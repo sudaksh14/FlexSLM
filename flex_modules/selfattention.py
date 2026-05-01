@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 
 class SelfAttention(Module):
-    def __init__(self, token_size: Iterable[int], heads: Iterable[int], dropout=0.0):
+    def __init__(self, token_size: Iterable[int], heads: Iterable[int], dropout=0.0, is_causal=False):
         super().__init__()
 
         def is_positive(x): return x > 0
@@ -28,6 +28,7 @@ class SelfAttention(Module):
         self.proj_token_size = token_size
         self.heads = heads
         self.dropout = dropout
+        self.is_causal = is_causal
 
         self.max_heads = max(heads)
         self.max_token_size = max(token_size)
@@ -65,6 +66,10 @@ class SelfAttention(Module):
 
         # compute self attention
         x = x.transpose(1, 0)
+        attn_mask = None
+        if self.is_causal:
+            attn_mask = nn.Transformer.generate_square_subsequent_mask(
+                x.shape[0], device=x.device, dtype=x.dtype)
         attn, _ = F.multi_head_attention_forward(
             query=x,
             key=x,
@@ -80,7 +85,9 @@ class SelfAttention(Module):
             out_proj_weight=w_out,
             out_proj_bias=b_out,
             training=self.training,
-            need_weights=False
+            need_weights=False,
+            attn_mask=attn_mask,
+            is_causal=self.is_causal
         )
         return attn.transpose(1, 0)
 

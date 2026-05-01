@@ -22,9 +22,9 @@ class PosEmbeddingLayer(Module):
             1, seq_length, hidden_dim[-1]).normal_(std=0.02))
         self.level = self.max_level()
 
-    # def forward(self, x):
-    #     return x + self.embedding[
-    #         :, :, :self.hidden_dims[self.level]]
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        seq_len = x.shape[1]
+        return x + self.embedding[:, :seq_len, :self.hidden_dims[self.level]]
 
     def set_level_use(self, level: int) -> None:
         self.level = level

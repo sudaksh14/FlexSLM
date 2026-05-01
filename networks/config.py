@@ -1,3 +1,4 @@
+import torch
 from torch import nn
 
 import flex_modules as fm
@@ -51,3 +52,6 @@ class FlexModelConfig(ModelConfig):
         Queries the maximum level the flexible model will have.
         """
         raise NotImplementedError()
+
+
+torch.serialization.add_safe_globals([ModelConfig, FlexModelConfig])

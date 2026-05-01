@@ -1,6 +1,6 @@
 from typing import Callable, Optional
 import dataclasses
-import tempfile
+import os
 import datetime
 import logging
 
@@ -183,6 +183,19 @@ class FlexModelTrainer(pl.LightningModule, BaseTrainer):
                 self.submodel.set_level_use(lt)
                 utils.flexible_model_copy(lmodel, self.submodel)
 
+    def handle_pretrained_hf(self):
+        name = getattr(self.model_config, 'pretrained_hf_model', None)
+        if name is None:
+            return
+        from networks.flexgpt import FlexGPT
+        from networks.flexllama import FlexLLaMA
+        if isinstance(self.submodel, FlexGPT):
+            utils.load_gpt2_weights_into_flexgpt(self.submodel, name)
+        elif isinstance(self.submodel, FlexLLaMA):
+            utils.load_llama_weights_into_flexllama(self.submodel, name)
+        else:
+            raise ValueError(f"No pretrained loader registered for {type(self.submodel).__name__}")
+
     def handle_distill(self):
         if self.training_context.distill:
             distill_config = self.model_config.no_prebuilt()
@@ -200,6 +213,7 @@ class FlexModelTrainer(pl.LightningModule, BaseTrainer):
         torch.set_float32_matmul_precision('high')
 
         self.handle_load_from()
+        self.handle_pretrained_hf()
         self.handle_distill()
         self.train_loop(self, conf_description)
 
@@ -209,6 +223,164 @@ class FlexModelTrainer(pl.LightningModule, BaseTrainer):
         optimizer = self.training_context.make_optimizer(self.submodel)
         scheduler = self.training_context.make_scheduler(optimizer)
         return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "monitor": "val_loss"}}
+
+
+class FlexLMTrainer(FlexModelTrainer):
+    """
+    Trainer function for FlexSLM models without KD
+    """
+
+    def _step(self, batch: tuple[torch.Tensor, torch.Tensor], stage: str) -> None:
+        input_ids, _ = batch  # both tensors are identical; labels are derived by shifting
+
+        if stage == "train":
+            opt = self.optimizers()
+            opt.zero_grad()
+
+        # Choose which levels to train this step
+        all_levels = list(range(self.submodel.max_level() + 1))
+        num_sample = getattr(self.training_context, "num_levels_per_step", None)
+        if stage == "train" and num_sample is not None:
+            import random
+            levels = random.sample(all_levels, k=min(num_sample, len(all_levels)))
+        else:
+            levels = all_levels
+
+        total_loss = 0.0
+        vocab_size = self.submodel.config.vocab_size
+
+        for i in levels:
+            self.submodel.set_level_use(i)
+            logits = self(input_ids)  # [B, S, vocab_size]
+
+            # CLM loss: predict token t+1 from token t at every position
+            loss = F.cross_entropy(
+                logits[:, :-1].reshape(-1, vocab_size),  # [B*(S-1), vocab_size]
+                input_ids[:, 1:].reshape(-1),            # [B*(S-1)]
+            )
+            ppl = torch.exp(loss.detach())
+
+            self.log(f"{stage}_level{i}_loss", loss,
+                     prog_bar=False, sync_dist=True)
+            self.log(f"{stage}_level{i}_ppl",  ppl,
+                     prog_bar=(stage != "train"), sync_dist=True)
+
+            if stage == "train":
+                self.manual_backward(loss)
+            total_loss += loss.clone().detach()
+
+        self.log(f"{stage}_loss", total_loss,
+                 prog_bar=(stage != "train"), sync_dist=True)
+
+        if stage == "train":
+            opt.step()
+
+
+class FlexLMKDTrainer(FlexLMTrainer):
+    """
+    FlexLMTrainer extended with knowledge distillation from a frozen teacher model
+    """
+
+    def __init__(self, model_config, training_context: FlexTrainingContext):
+        super().__init__(model_config, training_context)
+        # Store as plain Python attribute, not a PyTorch submodule, so Lightning
+        # doesn't include teacher weights in checkpoints.
+        object.__setattr__(self, '_teacher', None)
+
+    def _load_teacher(self):
+        from transformers import AutoModelForCausalLM
+        teacher_name = getattr(self.training_context, 'teacher_hf_model', None) or 'gpt2'
+        teacher = AutoModelForCausalLM.from_pretrained(teacher_name)
+        teacher.eval()
+        for p in teacher.parameters():
+            p.requires_grad_(False)
+        return teacher
+
+    def _step(self, batch, stage: str) -> None:
+        input_ids, _ = batch
+
+        kd_lambda    = self.training_context.kd_lambda
+        T            = self.training_context.kd_temperature
+        vocab_size   = self.submodel.config.vocab_size
+
+        if stage == "train":
+            opt = self.optimizers()
+            opt.zero_grad()
+
+        # Teacher forward no grad, done once per batch
+        with torch.no_grad():
+            teacher_logits = self._teacher(input_ids).logits  # [B, S, V]
+
+        all_levels = list(range(self.submodel.max_level() + 1))
+        num_sample = getattr(self.training_context, "num_levels_per_step", None)
+        if stage == "train" and num_sample is not None:
+            import random
+            levels = random.sample(all_levels, k=min(num_sample, len(all_levels)))
+        else:
+            levels = all_levels
+
+        total_loss = 0.0
+
+        for i in levels:
+            self.submodel.set_level_use(i)
+            logits = self(input_ids)  # [B, S, V]
+
+            # Shift by one position for CLM
+            student = logits[:, :-1]              # [B, S-1, V]
+            teacher = teacher_logits[:, :-1]      # [B, S-1, V]
+            targets = input_ids[:, 1:].reshape(-1)  # [B*(S-1)]
+
+            # CE loss against true tokens
+            ce_loss = F.cross_entropy(
+                student.reshape(-1, vocab_size),
+                targets,
+            )
+
+            # KL loss against teacher (soft targets, temperature T)
+            kl_loss = F.kl_div(
+                F.log_softmax(student / T, dim=-1).reshape(-1, vocab_size),
+                F.softmax(teacher / T, dim=-1).reshape(-1, vocab_size),
+                reduction="batchmean",
+            ) * (T ** 2)
+
+            loss = (1 - kd_lambda) * ce_loss + kd_lambda * kl_loss
+            ppl  = torch.exp(ce_loss.detach())
+
+            self.log(f"{stage}_level{i}_loss",    loss,    prog_bar=False, sync_dist=True)
+            self.log(f"{stage}_level{i}_ce_loss", ce_loss, prog_bar=False, sync_dist=True)
+            self.log(f"{stage}_level{i}_kl_loss", kl_loss, prog_bar=False, sync_dist=True)
+            self.log(f"{stage}_level{i}_ppl",     ppl,     prog_bar=(stage != "train"), sync_dist=True)
+
+            if stage == "train":
+                self.manual_backward(loss)
+            total_loss += loss.clone().detach()
+
+        self.log(f"{stage}_loss", total_loss, prog_bar=(stage != "train"), sync_dist=True)
+
+        if stage == "train":
+            opt.step()
+
+    def run_training(self, conf_description: str) -> None:
+        object.__setattr__(self, '_teacher', self._load_teacher())
+        super().run_training(conf_description)
+
+    def _ensure_teacher(self):
+        if self._teacher is None:
+            object.__setattr__(self, '_teacher', self._load_teacher())
+        object.__setattr__(self, '_teacher', self._teacher.to(self.device))
+
+    def on_fit_start(self):
+        self._ensure_teacher()
+
+    def on_test_start(self):
+        self._ensure_teacher()
+
+
+import functools
+torch.serialization.add_safe_globals([
+    TrainingContext, FlexTrainingContext, FlexModelTrainer, FlexLMTrainer, FlexLMKDTrainer,
+    functools.partial, utils.load_wikitext, utils.load_openwebtext, utils.load_fineweb_edu,
+    utils.load_data, utils.load_imagenet, utils.load_dummy_data])
 
 
 class SimpleTrainer(pl.LightningModule, BaseTrainer):
@@ -269,63 +441,92 @@ def finetune(model: pl.LightningModule, config: TrainingContext, conf_descriptio
         logging.getLogger(
             'lightning_fabric.utilities.distributed').setLevel(logging.ERROR)
 
-    with tempfile.TemporaryDirectory() as tdir:
-        early_stopping = EarlyStopping(
-            monitor='val_loss', patience=config.patience, mode='min', verbose=True)
+    # Persistent directory, survives crashes; temp dirs lose weights if anything
+    # between trainer.fit() and utils.save_model() raises.
+    ckpt_dir = paths.CHECKPOINT_PATH / utils.make_str_filename_safe(conf_description)
+    os.makedirs(ckpt_dir, exist_ok=True)
 
-        checkpoint_callback = ModelCheckpoint(
-            dirpath=tdir,
-            filename='best-model',
-            monitor='val_loss',
-            mode='min',
-            save_top_k=1
-        )
+    early_stopping = EarlyStopping(
+        monitor='val_loss', patience=config.patience, mode='min', verbose=True)
 
-        callbacks = [early_stopping, checkpoint_callback]
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=ckpt_dir,
+        filename='best-model',
+        monitor='val_loss',
+        mode='min',
+        save_top_k=1
+    )
 
-        kwargs = dict()
-        if config.wandb_project_name is not None:
-            if logger is None:
-                logger = WandbLogger(
-                    project=config.wandb_project_name,
-                    name=f"{conf_description}_das6",
-                    config=model_config.get_flat_dict(),
-                    save_dir=paths.LOG_PATH,
-                    dir=paths.LOG_PATH,
-                    log_model=False)
-            kwargs['logger'] = logger
-        else:
-            kwargs['logger'] = False
+    callbacks = [early_stopping, checkpoint_callback]
 
-        if config.unittest_mode:
-            kwargs['enable_progress_bar'] = False
-            kwargs['enable_model_summary'] = False
+    kwargs = dict()
+    if config.wandb_project_name is not None:
+        if logger is None:
+            logger = WandbLogger(
+                project=config.wandb_project_name,
+                name=f"{conf_description}_das6",
+                config=model_config.get_flat_dict(),
+                save_dir=paths.LOG_PATH,
+                dir=paths.LOG_PATH,
+                log_model=False)
+        kwargs['logger'] = logger
+    else:
+        kwargs['logger'] = False
 
-        ddp = DDPStrategy(process_group_backend='nccl', find_unused_parameters=True)
-        trainer = pl.Trainer(
-            **kwargs,
-            max_epochs=config.epochs,
-            callbacks=callbacks,
-            log_every_n_steps=10,
-            enable_checkpointing=True,
-            accelerator="gpu",
-            devices="auto",
-            num_nodes=utils.get_num_nodes(),
-            strategy=ddp,
-            precision='bf16-mixed'
-        )
+    if config.unittest_mode:
+        kwargs['enable_progress_bar'] = False
+        kwargs['enable_model_summary'] = False
 
-        train_loader, val_loader, test_loader = config.loader_function()
+    ddp = DDPStrategy(process_group_backend='nccl', find_unused_parameters=True)
+    trainer = pl.Trainer(
+        **kwargs,
+        max_epochs=config.epochs,
+        callbacks=callbacks,
+        log_every_n_steps=10,
+        enable_checkpointing=True,
+        accelerator="gpu",
+        devices="auto",
+        num_nodes=utils.get_num_nodes(),
+        strategy=ddp,
+        precision='bf16-mixed'
+    )
+
+    train_loader, val_loader, test_loader = config.loader_function()
+
+    try:
         trainer.fit(model, train_loader, val_loader)
+    except Exception as exc:
+        # Training may have fully completed before a post-epoch callback (e.g.
+        # scheduler step) raised.  Try to recover and permanently save the best
+        # checkpoint so the run is not completely lost.
+        best_path = getattr(checkpoint_callback, 'best_model_path', '')
+        if best_path:
+            logging.warning(
+                f"trainer.fit() raised {exc!r}. Attempting recovery from {best_path}")
+            try:
+                recovered = type(model).load_from_checkpoint(best_path)
+                utils.save_model(conf_description, recovered.submodel)
+                logging.warning("Recovery succeeded. Weights saved to permanent storage.")
+            except Exception as rec_exc:
+                logging.error(
+                    f"Recovery failed: {rec_exc!r}. Checkpoint preserved at: {best_path}")
+        raise
 
-        if utils.get_num_nodes() > 1:
-            if trainer.is_global_zero:
-                model = type(model).load_from_checkpoint(
-                        checkpoint_callback.best_model_path)
-            
-        else:
+    # Load best checkpoint and save immediately, before test() can crash.
+    if utils.get_num_nodes() > 1:
+        if trainer.is_global_zero:
             model = type(model).load_from_checkpoint(
-                    checkpoint_callback.best_model_path)
+                checkpoint_callback.best_model_path)
+            utils.save_model(conf_description, model.submodel)
+    else:
+        model = type(model).load_from_checkpoint(
+            checkpoint_callback.best_model_path)
+        utils.save_model(conf_description, model.submodel)
+
+    # Testing is informational, a failure here must not erase already-saved weights.
+    try:
         trainer.test(model, dataloaders=test_loader, verbose=False)
+    except Exception as exc:
+        logging.warning(f"trainer.test() failed (weights already saved): {exc!r}")
 
     return model
