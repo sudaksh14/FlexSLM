@@ -699,6 +699,20 @@ CONFIGS = {
                 wandb_project_name="FlexLLaMA_fineweb_kd_lambda05",
             ),
         ),
+        'fineweb.kd_lambda05_1p4B': TrainerBuilder(
+            FlexLMKDTrainer,
+            FlexLLaMAConfig(
+                pretrained_hf_model="JackFram/llama-160m",
+            ),
+            LLaMAKDTrainingContext(
+                kd_lambda=0.5,
+                kd_temperature=2.0,
+                max_examples=2_000_000,  # ~1.4B tokens at ~700 tok/doc, up from the 100M-token default
+                epochs=3,
+                patience=3,
+                wandb_project_name="FlexLLaMA_fineweb_kd_lambda05_1p4B",
+            ),
+        ),
         'fineweb.kd_lambda05_5levels': TrainerBuilder(
             FlexLMKDTrainer,
             FlexLLaMAConfig(
