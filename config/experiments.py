@@ -61,12 +61,13 @@ class LLaMATrainingContext(GPTTrainingContext):
 
     def __init__(self, dataset="fineweb-edu", max_seq_length=1024, batch_size=8,
                  num_levels_per_step=None, patience=3, epochs=10,
-                 max_examples=150_000, *args, **kwargs):
+                 max_examples=150_000, max_tokens=None, *args, **kwargs):
         if dataset == "fineweb-edu":
             loader = partial(utils.load_fineweb_edu,
                              max_seq_length=max_seq_length,
                              batch_size=batch_size,
-                             max_examples=max_examples)
+                             max_examples=max_examples,
+                             max_tokens=max_tokens)
         else:
             loader = partial(utils.load_wikitext, dataset_name=dataset,
                              max_seq_length=max_seq_length,
@@ -85,12 +86,13 @@ class LLaMAKDTrainingContext(FlexLMKDTrainingContext):
                  tokenizer_name='JackFram/llama-160m',
                  dataset="fineweb-edu", max_seq_length=1024, batch_size=8,
                  num_levels_per_step=None, patience=3, epochs=10,
-                 max_examples=150_000, map_workers=None, *args, **kwargs):
+                 max_examples=150_000, max_tokens=None, map_workers=None, *args, **kwargs):
         if dataset == "fineweb-edu":
             loader = partial(utils.load_fineweb_edu,
                              max_seq_length=max_seq_length,
                              batch_size=batch_size,
                              max_examples=max_examples,
+                             max_tokens=max_tokens,
                              tokenizer_name=tokenizer_name,
                              map_workers=map_workers)
         else:
@@ -534,6 +536,22 @@ CONFIGS = {
                 epochs=3,
                 patience=3,
                 wandb_project_name="FlexLLaMA_fineweb_kd_lambda05_1p4B",
+            ),
+        ),
+        'fineweb.kd_lambda05_10B': TrainerBuilder(
+            FlexLMKDTrainer,
+            FlexLLaMAConfig(
+                pretrained_hf_model="JackFram/llama-160m",
+            ),
+            LLaMAKDTrainingContext(
+                kd_lambda=0.5,
+                kd_temperature=2.0,
+                max_tokens=10_000_000_000,  # ~all of sample-10BT - the largest slice available without
+                                            # changing the HF split name in utils.load_fineweb_edu
+                map_workers=1,  # 4 DDP ranks each tokenize independently; num_proc=4 per rank OOM'd at 1.4B already
+                epochs=1,
+                patience=1,
+                wandb_project_name="FlexLLaMA_fineweb_kd_lambda05_10B",
             ),
         ),
         'fineweb.kd_tinyllama': make_flexllama_kd(

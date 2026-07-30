@@ -1,12 +1,12 @@
 #!/usr/bin/bash
 #SBATCH --job-name=flexllama_choose_slm
-#SBATCH --partition=capacity
+#SBATCH --partition=performance
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=4
 #SBATCH --ntasks-per-node=4
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=32
 #SBATCH --time=48:00:00
-#SBATCH --mem=180G
+#SBATCH --mem=300G
 #SBATCH --output=%x-%j.out
 
 # Pick which SLM to train by uncommenting exactly ONE of the CONFIG= lines
@@ -17,14 +17,13 @@
 # wins. The check below only catches the "none uncommented" case.
 
 # --- llama-160m (random-init unless noted; small enough to iterate fast) ---
-# CONFIG=flexllama,fineweb.kd_pure                          # pure KD (kd_lambda=1.0), warm-started
-# CONFIG=flexllama,fineweb.kd_lambda05                       # mixed KD (kd_lambda=0.5), warm-started
-# CONFIG=flexllama,fineweb.kd_lambda05_1p4B                  # same, larger ~1.4B-token FineWeb-Edu slice
+# CONFIG=flexllama,fineweb.kd_lambda05                        # mixed KD (kd_lambda=0.5), warm-started
+# CONFIG=flexllama,fineweb.kd_lambda05_1p4B                   # same, larger ~1.4B-token FineWeb-Edu slice
 # CONFIG=flexllama,fineweb.kd_lambda05_5levels               # same, 5 flex levels
 
 # --- TinyLlama-1.1B (GQA 32/4 heads) ---
 # CONFIG=flexllama,fineweb.kd_tinyllama                      # KD-only, random-init student
-CONFIG=flexllama,fineweb.kd_tinyllama_warmstart              # warm-started, 3 levels (default)
+# CONFIG=flexllama,fineweb.kd_tinyllama_warmstart              # warm-started, 3 levels (default)
 # CONFIG=flexllama,fineweb.kd_tinyllama_warmstart_5levels    # warm-started, 5 levels
 # CONFIG=flexllama,fineweb.kd_tinyllama_warmstart_7levels    # warm-started, 7 levels
 # CONFIG=flexllama,fineweb.kd_tinyllama_warmstart_10levels   # warm-started, 10 levels
@@ -39,7 +38,7 @@ CONFIG=flexllama,fineweb.kd_tinyllama_warmstart              # warm-started, 3 l
 # CONFIG=flexllama,fineweb.kd_qwen25_0p5b                    # 0.5B, KD-only, random-init student
 # CONFIG=flexllama,fineweb.kd_qwen25_0p5b_warmstart          # 0.5B, warm-started
 # CONFIG=flexllama,fineweb.kd_qwen25_1p5b                    # 1.5B, KD-only, random-init student
-# CONFIG=flexllama,fineweb.kd_qwen25_1p5b_warmstart          # 1.5B, warm-started
+CONFIG=flexllama,fineweb.kd_qwen25_1p5b_warmstart           # 1.5B, warm-started
 
 # --- Llama-3.2-1B (gated on HF: needs license accepted + HF_TOKEN set) ---
 # CONFIG=flexllama,fineweb.kd_llama32_1b                     # KD-only only - dims unverified, no warm-start preset

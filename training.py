@@ -454,6 +454,15 @@ def finetune(model: pl.LightningModule, config: TrainingContext, conf_descriptio
     ckpt_dir = paths.CHECKPOINT_PATH / utils.make_str_filename_safe(conf_description)
     os.makedirs(ckpt_dir, exist_ok=True)
 
+    # Resume from a prior run's checkpoint if one exists at this path, checked
+    # before trainer.fit() so an interrupted/preempted job picks back up (full
+    # training state - weights, optimizer, epoch/step counters) instead of
+    # silently restarting from the warm-start/random init every time.
+    resume_ckpt_path = ckpt_dir / 'best-model.ckpt'
+    resume_from = str(resume_ckpt_path) if resume_ckpt_path.exists() else None
+    if resume_from:
+        logging.info(f"Found existing checkpoint at {resume_from}, resuming training from it.")
+
     early_stopping = EarlyStopping(
         monitor='val_loss', patience=config.patience, mode='min', verbose=True)
 
@@ -507,7 +516,7 @@ def finetune(model: pl.LightningModule, config: TrainingContext, conf_descriptio
     train_loader, val_loader, test_loader = config.loader_function()
 
     try:
-        trainer.fit(model, train_loader, val_loader)
+        trainer.fit(model, train_loader, val_loader, ckpt_path=resume_from)
     except Exception as exc:
         # Training may have fully completed before a post-epoch callback (e.g.
         # scheduler step) raised.  Try to recover and permanently save the best

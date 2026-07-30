@@ -416,6 +416,7 @@ def load_fineweb_edu(
     map_workers: int = None,
     cache_dir: str = None,
     max_examples: int = 150_000,
+    max_tokens: int = None,
     val_size: int = 2000,
     test_size: int = 2000,
     tokenizer_name: str = "JackFram/llama-160m",
@@ -424,9 +425,11 @@ def load_fineweb_edu(
     Loads FineWeb-Edu (sample-10BT), tokenises with the specified tokenizer,
     packs sequences to max_seq_length, and returns (train, val, test) loaders.
 
-    max_examples limits the number of source documents (default 150k ≈ 100M tokens
-    at ~700 tokens/doc average). FineWeb-Edu has only a train split so val and test
-    are carved out with a fixed seed.
+    Dataset size is controlled by either max_tokens (exact - streams and counts
+    real tokens until the target is reached) or max_examples (approximate - a
+    fixed document count, default 150k ~= 100M tokens at ~700 tokens/doc average).
+    max_tokens takes precedence when both are given. FineWeb-Edu has only a train
+    split so val and test are carved out with a fixed seed.
 
     tokenizer_name defaults to JackFram/llama-160m (vocab_size=32000). Pass "gpt2"
     when training FlexGPT on FineWeb-Edu (vocab_size=50257).
@@ -438,7 +441,8 @@ def load_fineweb_edu(
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, cache_dir=cache_dir)
 
     # Stream to avoid downloading the full 10BT dataset, only fetch the shards
-    # that contain the first max_examples documents (~450MB instead of ~100GB).
+    # that contain the documents actually needed (~450MB instead of ~100GB for
+    # the previous 150k-doc default).
     raw_stream = load_dataset(
         "HuggingFaceFW/fineweb-edu",
         name="sample-10BT",
@@ -446,7 +450,16 @@ def load_fineweb_edu(
         streaming=True,
         cache_dir=cache_dir,
     )
-    raw = Dataset.from_list(list(raw_stream.take(max_examples)))
+    if max_tokens is not None:
+        docs, total_tokens = [], 0
+        for example in raw_stream:
+            total_tokens += len(tokenizer(example["text"], add_special_tokens=False)["input_ids"])
+            docs.append(example)
+            if total_tokens >= max_tokens:
+                break
+        raw = Dataset.from_list(docs)
+    else:
+        raw = Dataset.from_list(list(raw_stream.take(max_examples)))
 
     # FineWeb-Edu has only a train split, carve out val and test
     split   = raw.train_test_split(test_size=val_size + test_size, seed=42)
