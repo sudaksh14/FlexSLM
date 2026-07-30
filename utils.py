@@ -613,14 +613,31 @@ def load_llama_weights_into_flexllama(
         cache_dir: str = None,
 ) -> None:
     """
-    Loads HuggingFace LLaMA-1/2 pretrained weights into a max-level FlexLLaMA model.
+    Loads pretrained weights from a HF LLaMA-family or Qwen2-family checkpoint into
+    a max-level FlexLLaMA model. Qwen2 mirrors LLaMA's module naming closely enough
+    (self_attn.{q,k,v,o}_proj, mlp.{gate,up,down}_proj, input/post_attention_layernorm,
+    model.norm, model.embed_tokens, lm_head) that the same key layout works for both;
+    the only structural difference handled here is Qwen2's biased q/k/v projections
+    (cfg.qkv_bias).
     """
-    from transformers import AutoModelForCausalLM
+    from transformers import AutoConfig, AutoModelForCausalLM
     from flex_modules.rmsnorm import _RMSNormBase
+
+    hf_config = AutoConfig.from_pretrained(hf_model_name, cache_dir=cache_dir)
+    if hf_config.model_type not in ("llama", "qwen2"):
+        raise ValueError(
+            f"load_llama_weights_into_flexllama only supports llama/qwen2 "
+            f"checkpoints (identical module naming); got model_type={hf_config.model_type!r} "
+            f"for {hf_model_name}"
+        )
 
     cfg = model.config
     max_hidden       = list(cfg.hidden_dims)[-1]
     max_intermediate = list(cfg.intermediate_dims)[-1]
+    max_num_heads    = list(cfg.num_heads)[-1]
+    max_num_kv_heads = list(cfg.num_kv_heads)[-1]
+    head_dim         = max_hidden // max_num_heads
+    max_kv_dim       = max_num_kv_heads * head_dim
 
     hf = AutoModelForCausalLM.from_pretrained(hf_model_name, cache_dir=cache_dir)
     sd = hf.state_dict()
@@ -633,6 +650,7 @@ def load_llama_weights_into_flexllama(
         1 for k in sd if k.startswith("model.layers.") and k.endswith(".input_layernorm.weight")
     )
     hf_intermediate = sd["model.layers.0.mlp.gate_proj.weight"].shape[0]
+    hf_kv_dim       = sd["model.layers.0.self_attn.k_proj.weight"].shape[0]
 
     if hf_hidden != max_hidden:
         raise ValueError(f"Hidden dim mismatch: checkpoint={hf_hidden}, model max level={max_hidden}")
@@ -642,6 +660,13 @@ def load_llama_weights_into_flexllama(
         raise ValueError(f"Layer count mismatch: checkpoint={hf_layers}, model={cfg.num_layers}")
     if hf_intermediate != max_intermediate:
         raise ValueError(f"Intermediate dim mismatch: checkpoint={hf_intermediate}, model max level={max_intermediate}")
+    if hf_kv_dim != max_kv_dim:
+        raise ValueError(
+            f"KV projection dim mismatch: checkpoint={hf_kv_dim} (implies "
+            f"num_kv_heads={hf_kv_dim // head_dim}), model max level expects "
+            f"num_kv_heads={max_num_kv_heads} (kv_dim={max_kv_dim}). Set "
+            f"num_kv_heads in FlexLLaMAConfig to match the checkpoint."
+        )
 
     model.set_level_use(model.max_level())
 
@@ -659,10 +684,18 @@ def load_llama_weights_into_flexllama(
         tmp_rms.weight.data.copy_(sd[f"{pfx}.input_layernorm.weight"])
         block.input_layernorm.load_from_base(tmp_rms)
 
-        # Attention projections, [out, in] layout, no transpose needed
-        for proj in ("q_proj", "k_proj", "v_proj", "o_proj"):
-            tmp_linear = nn.Linear(max_hidden, max_hidden, bias=False)
+        # Attention projections, [out, in] layout, no transpose needed.
+        # q_proj/o_proj are always hidden->hidden; k_proj/v_proj output kv_dim,
+        # which is smaller than hidden when the checkpoint uses GQA. q/k/v carry
+        # bias on Qwen2-family checkpoints (cfg.qkv_bias); o_proj never does.
+        for proj, out_dim, has_bias in (
+            ("q_proj", max_hidden, cfg.qkv_bias), ("k_proj", max_kv_dim, cfg.qkv_bias),
+            ("v_proj", max_kv_dim, cfg.qkv_bias), ("o_proj", max_hidden, False),
+        ):
+            tmp_linear = nn.Linear(max_hidden, out_dim, bias=has_bias)
             tmp_linear.weight.data.copy_(sd[f"{pfx}.self_attn.{proj}.weight"])
+            if has_bias:
+                tmp_linear.bias.data.copy_(sd[f"{pfx}.self_attn.{proj}.bias"])
             getattr(block.self_attn, proj).load_from_base(tmp_linear)
 
         # Post-attention RMSNorm

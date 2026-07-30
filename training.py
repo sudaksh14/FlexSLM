@@ -3,8 +3,9 @@ import dataclasses
 import os
 import datetime
 import logging
+import random
 
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, Timer
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, Timer, LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.strategies import DDPStrategy
 from torch.utils.data import DataLoader
@@ -230,6 +231,26 @@ class FlexLMTrainer(FlexModelTrainer):
     Trainer function for FlexSLM models without KD
     """
 
+    def _select_levels(self, stage: str) -> list[int]:
+        """
+        Levels to run this step. Validation/test always cover every level (for
+        honest per-level metrics). Training samples num_levels_per_step of them
+        when set and smaller than the total - the min and max level are always
+        included (never looped over/dropped), with the remaining slots drawn at
+        random from the levels in between. num_levels_per_step >= total levels
+        (or unset) trains every level, same as looping over all of them.
+        """
+        all_levels = list(range(self.submodel.max_level() + 1))
+        num_sample = getattr(self.training_context, "num_levels_per_step", None)
+        if stage != "train" or num_sample is None or num_sample >= len(all_levels):
+            return all_levels
+
+        required = {all_levels[0], all_levels[-1]}
+        pool = [l for l in all_levels if l not in required]
+        num_extra = max(0, num_sample - len(required))
+        extra = random.sample(pool, k=min(num_extra, len(pool)))
+        return sorted(required | set(extra))
+
     def _step(self, batch: tuple[torch.Tensor, torch.Tensor], stage: str) -> None:
         input_ids, _ = batch  # both tensors are identical; labels are derived by shifting
 
@@ -237,14 +258,7 @@ class FlexLMTrainer(FlexModelTrainer):
             opt = self.optimizers()
             opt.zero_grad()
 
-        # Choose which levels to train this step
-        all_levels = list(range(self.submodel.max_level() + 1))
-        num_sample = getattr(self.training_context, "num_levels_per_step", None)
-        if stage == "train" and num_sample is not None:
-            import random
-            levels = random.sample(all_levels, k=min(num_sample, len(all_levels)))
-        else:
-            levels = all_levels
+        levels = self._select_levels(stage)
 
         total_loss = 0.0
         vocab_size = self.submodel.config.vocab_size
@@ -311,13 +325,7 @@ class FlexLMKDTrainer(FlexLMTrainer):
         with torch.no_grad():
             teacher_logits = self._teacher(input_ids).logits  # [B, S, V]
 
-        all_levels = list(range(self.submodel.max_level() + 1))
-        num_sample = getattr(self.training_context, "num_levels_per_step", None)
-        if stage == "train" and num_sample is not None:
-            import random
-            levels = random.sample(all_levels, k=min(num_sample, len(all_levels)))
-        else:
-            levels = all_levels
+        levels = self._select_levels(stage)
 
         total_loss = 0.0
 
@@ -462,14 +470,19 @@ def finetune(model: pl.LightningModule, config: TrainingContext, conf_descriptio
     kwargs = dict()
     if config.wandb_project_name is not None:
         if logger is None:
+            num_levels = model_config.max_level() + 1
+            wandb_config = dict(model_config.get_flat_dict())
+            wandb_config['num_levels'] = num_levels
+            wandb_config['num_levels_per_step'] = getattr(config, 'num_levels_per_step', None) or num_levels
             logger = WandbLogger(
                 project=config.wandb_project_name,
                 name=f"{conf_description}_das6",
-                config=model_config.get_flat_dict(),
+                config=wandb_config,
                 save_dir=paths.LOG_PATH,
                 dir=paths.LOG_PATH,
                 log_model=False)
         kwargs['logger'] = logger
+        callbacks.append(LearningRateMonitor(logging_interval='step'))
     else:
         kwargs['logger'] = False
 

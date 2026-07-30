@@ -398,7 +398,7 @@ def finetune(model: pl.LightningModule, config: TrainingContext, conf_descriptio
     if config.wandb_project_name is not None:
         logger = WandbLogger(
             project=config.wandb_project_name,
-            name=f"{conf_description}_ivi",
+            name=f"{conf_description}_hipster",
             config=model_config.get_flat_dict(),
             save_dir=paths.LOG_PATH,
             dir=paths.LOG_PATH,

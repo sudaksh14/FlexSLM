@@ -22,6 +22,7 @@ class FlexLLaMAConfig(FlexModelConfig):
     rope_theta: float = 10000.0
     rms_norm_eps: float = 1e-6
     tie_embeddings: bool = False
+    qkv_bias: bool = False  # True for Qwen2-family checkpoints; LLaMA family has no attention bias
     pretrained_hf_model: Optional[str] = None
 
     def make_model(self) -> 'FlexLLaMA':
@@ -66,12 +67,16 @@ class LLaMADecoderBlock(nn.Module):
         rope_theta: float,
         rms_norm_eps: float,
         max_seq_len: int,
+        num_kv_heads: Iterable[int] = None,
+        qkv_bias: bool = False,
     ):
         super().__init__()
         self.input_layernorm          = fm.RMSNorm(hidden_dims, eps=rms_norm_eps)
         self.self_attn                = fm.RoPEAttention(hidden_dims, num_heads,
+                                                         num_kv_heads=num_kv_heads,
                                                          rope_theta=rope_theta,
-                                                         max_seq_len=max_seq_len)
+                                                         max_seq_len=max_seq_len,
+                                                         qkv_bias=qkv_bias)
         self.post_attention_layernorm = fm.RMSNorm(hidden_dims, eps=rms_norm_eps)
         self.mlp                      = LLaMAMLPBlock(hidden_dims, intermediate_dims)
 
@@ -92,6 +97,7 @@ class FlexLLaMA(FlexModel):
 
         hidden_dims       = list(config.hidden_dims)
         num_heads         = list(config.num_heads)
+        num_kv_heads      = list(config.num_kv_heads)
         intermediate_dims = list(config.intermediate_dims)
         n_levels          = len(hidden_dims)
 
@@ -103,6 +109,7 @@ class FlexLLaMA(FlexModel):
             {f"layer_{i}": LLaMADecoderBlock(
                 hidden_dims, num_heads, intermediate_dims,
                 config.rope_theta, config.rms_norm_eps, config.max_seq_length,
+                num_kv_heads=num_kv_heads, qkv_bias=config.qkv_bias,
             ) for i in range(config.num_layers)}
         ))
 

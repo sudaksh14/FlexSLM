@@ -24,6 +24,8 @@
 source "$HOME/miniconda3/etc/profile.d/conda.sh"
 conda activate my_env
 
+nvidia-smi
+
 CONFIG=${1:-flexllama,fineweb.kd_lambda05_1p4B}
 
-exec "$(dirname "$0")/experiment_job.sh" "$CONFIG"
+exec "$SLURM_SUBMIT_DIR/experiment_job.sh" "$CONFIG"
