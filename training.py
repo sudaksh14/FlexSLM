@@ -34,6 +34,7 @@ class TrainingContext(utils.SelfDescripting):
     wandb_project_name: str = config.wandb.WANDB_PROJECT_NAME
 
     unittest_mode: bool = False
+    resume: bool = True  # if a checkpoint exists at this config's path, resume from it; set False to force a fresh start
 
     def make_optimizer(self, model) -> torch.optim.Optimizer:
         raise NotImplementedError()
@@ -304,7 +305,9 @@ class FlexLMKDTrainer(FlexLMTrainer):
     def _load_teacher(self):
         from transformers import AutoModelForCausalLM
         teacher_name = getattr(self.training_context, 'teacher_hf_model', None) or 'gpt2'
-        teacher = AutoModelForCausalLM.from_pretrained(teacher_name)
+        # bfloat16: teacher is frozen/eval-only, no need for the fp32 default's
+        # memory cost (halves weight memory, e.g. ~6.2GB->~3.1GB for a 1.5B teacher).
+        teacher = AutoModelForCausalLM.from_pretrained(teacher_name, dtype=torch.bfloat16)
         teacher.eval()
         for p in teacher.parameters():
             p.requires_grad_(False)
@@ -457,11 +460,16 @@ def finetune(model: pl.LightningModule, config: TrainingContext, conf_descriptio
     # Resume from a prior run's checkpoint if one exists at this path, checked
     # before trainer.fit() so an interrupted/preempted job picks back up (full
     # training state - weights, optimizer, epoch/step counters) instead of
-    # silently restarting from the warm-start/random init every time.
-    resume_ckpt_path = ckpt_dir / 'best-model.ckpt'
-    resume_from = str(resume_ckpt_path) if resume_ckpt_path.exists() else None
+    # silently restarting from the warm-start/random init every time. Resumes
+    # from last.ckpt (always saved, see save_last=True below), not best-model.ckpt -
+    # resuming should continue from the most recent point, not roll back to
+    # whichever earlier step happened to have the best val_loss so far.
+    resume_ckpt_path = ckpt_dir / 'last.ckpt'
+    resume_from = str(resume_ckpt_path) if (config.resume and resume_ckpt_path.exists()) else None
     if resume_from:
         logging.info(f"Found existing checkpoint at {resume_from}, resuming training from it.")
+    elif config.resume is False and resume_ckpt_path.exists():
+        logging.info(f"resume=False - ignoring existing checkpoint at {resume_ckpt_path}, starting fresh.")
 
     early_stopping = EarlyStopping(
         monitor='val_loss', patience=config.patience, mode='min', verbose=True)
@@ -471,7 +479,8 @@ def finetune(model: pl.LightningModule, config: TrainingContext, conf_descriptio
         filename='best-model',
         monitor='val_loss',
         mode='min',
-        save_top_k=1
+        save_top_k=1,
+        save_last=True,  # always overwrite last.ckpt too, even when val_loss doesn't improve - this is what resume uses
     )
 
     callbacks = [early_stopping, checkpoint_callback]
@@ -499,12 +508,27 @@ def finetune(model: pl.LightningModule, config: TrainingContext, conf_descriptio
         kwargs['enable_progress_bar'] = False
         kwargs['enable_model_summary'] = False
 
+    train_loader, val_loader, test_loader = config.loader_function()
+
+    # Space checkpoints through the epoch (every ~1/20th of it) rather than only
+    # at epoch end - for a streaming IterableDataset (unknown length) an "epoch"
+    # only ends once the whole requested corpus is exhausted, which for a large
+    # corpus could be hours; without this, a preempted job could have nothing to
+    # resume from at all. len() works for ordinary (materialized) loaders;
+    # streaming loaders instead carry an estimate (see utils.load_fineweb_edu).
+    try:
+        steps_per_epoch = len(train_loader)
+    except TypeError:
+        steps_per_epoch = getattr(train_loader, 'estimated_steps_per_epoch', None)
+    val_check_interval = max(1, steps_per_epoch // 20) if steps_per_epoch else 1.0
+
     ddp = DDPStrategy(process_group_backend='nccl', find_unused_parameters=True)
     trainer = pl.Trainer(
         **kwargs,
         max_epochs=config.epochs,
         callbacks=callbacks,
         log_every_n_steps=10,
+        val_check_interval=val_check_interval,
         enable_checkpointing=True,
         accelerator="gpu",
         devices="auto",
@@ -512,8 +536,6 @@ def finetune(model: pl.LightningModule, config: TrainingContext, conf_descriptio
         strategy=ddp,
         precision='bf16-mixed'
     )
-
-    train_loader, val_loader, test_loader = config.loader_function()
 
     try:
         trainer.fit(model, train_loader, val_loader, ckpt_path=resume_from)

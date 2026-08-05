@@ -54,7 +54,12 @@ def print_all_conf_commands(conf, basestr, file=sys.stdout) -> None:
 
 
 if __name__ == "__main__":
-    command, conf = sys.argv[1:]
+    args = sys.argv[1:]
+    resume = True
+    if '--no-resume' in args:
+        args.remove('--no-resume')
+        resume = False
+    command, conf = args
     res = resolve_from_str(conf)
     if command == "list":
         print_all_conf_paths(res, conf)
@@ -65,6 +70,7 @@ if __name__ == "__main__":
             config.hardware.CurrentDevice.set_hardware(hw)
         else:
             config.hardware.CurrentDevice.set_hardware(DEFAULT_HARDWARE_CONFIG)
+        res.training_context.resume = resume
         res(conf)
     elif command == "listcommand":
         print_all_conf_commands(res, conf)

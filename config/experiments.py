@@ -625,6 +625,7 @@ CONFIGS = {
         'fineweb.kd_qwen25_1p5b_warmstart': make_flexllama_warmstart_kd(
             "qwen2.5-1.5b",
             kd_lambda=0.5, kd_temperature=2.0, epochs=10, patience=3,
+            batch_size=4,  # 1.5B student+teacher was OOMing at 43.86GB/47.4GB with batch_size=8
             wandb_project_name="FlexLLaMA_fineweb_kd_qwen25_1p5b_warmstart",
         ),
         'fineweb.kd_lambda05_5levels': TrainerBuilder(

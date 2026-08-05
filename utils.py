@@ -422,27 +422,53 @@ def load_fineweb_edu(
     tokenizer_name: str = "JackFram/llama-160m",
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
     """
-    Loads FineWeb-Edu (sample-10BT), tokenises with the specified tokenizer,
-    packs sequences to max_seq_length, and returns (train, val, test) loaders.
+    Streams FineWeb-Edu (sample-10BT) end-to-end - documents are tokenized and
+    packed lazily as they're consumed, so memory use stays bounded (roughly one
+    packing buffer) regardless of how large a corpus is requested. Replaces the
+    old eager Dataset.from_list(list(stream.take(...))) materialization, which
+    OOM'd once the target corpus reached a few million documents (compounded
+    under DDP, where every rank redundantly materialized the same target).
 
-    Dataset size is controlled by either max_tokens (exact - streams and counts
-    real tokens until the target is reached) or max_examples (approximate - a
-    fixed document count, default 150k ~= 100M tokens at ~700 tokens/doc average).
-    max_tokens takes precedence when both are given. FineWeb-Edu has only a train
-    split so val and test are carved out with a fixed seed.
+    Dataset size is controlled by either max_tokens or max_examples (max_tokens
+    takes precedence when both are given). Getting an *exact* token count would
+    require tokenizing ahead of time, which is what the old implementation did at
+    the cost of a full materialization pass; here max_tokens is instead converted
+    to an approximate document count via AVG_TOKENS_PER_DOC (measured on this
+    exact split - real runs land within a few percent of the target, not exact
+    to the token).
+
+    Under DDP (SLURM_PROCID/SLURM_NTASKS set), the source stream is sharded via
+    split_dataset_by_node *before* anything else, and the target is divided by
+    world_size - each rank streams and tokenizes only its own disjoint slice
+    instead of every rank redundantly processing the full target, which is both
+    the memory fix and skips tokenizing data that Lightning's DistributedSampler
+    would otherwise discard during training anyway.
+
+    FineWeb-Edu has only a train split; val and test are a fixed-position
+    held-out prefix of the (rank-sharded) stream, train is everything after them.
+    Train gets an approximate shuffle (datasets' buffered/reservoir shuffle - true
+    random shuffling isn't possible without materializing the whole corpus).
+
+    map_workers/num_workers are accepted for backward compatibility but are now
+    no-ops: streaming .map() has no multiprocess num_proc, and the DataLoader
+    itself stays single-process (num_workers=0) to avoid each PyTorch worker
+    re-iterating the stream from the start independently.
 
     tokenizer_name defaults to JackFram/llama-160m (vocab_size=32000). Pass "gpt2"
     when training FlexGPT on FineWeb-Edu (vocab_size=50257).
     add_special_tokens=False suppresses BOS tokens so the packed format is consistent.
     """
-    from datasets import load_dataset, Dataset
+    from datasets import load_dataset
+    from datasets.distributed import split_dataset_by_node
     from transformers import AutoTokenizer
+
+    AVG_TOKENS_PER_DOC = 1000  # measured ~1048 on this split; rounded down to slightly overshoot rather than undershoot
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, cache_dir=cache_dir)
 
-    # Stream to avoid downloading the full 10BT dataset, only fetch the shards
-    # that contain the documents actually needed (~450MB instead of ~100GB for
-    # the previous 150k-doc default).
+    rank = int(os.environ.get('SLURM_PROCID', 0))
+    world_size = int(os.environ.get('SLURM_NTASKS', 1))
+
     raw_stream = load_dataset(
         "HuggingFaceFW/fineweb-edu",
         name="sample-10BT",
@@ -450,25 +476,23 @@ def load_fineweb_edu(
         streaming=True,
         cache_dir=cache_dir,
     )
-    if max_tokens is not None:
-        docs, total_tokens = [], 0
-        for example in raw_stream:
-            total_tokens += len(tokenizer(example["text"], add_special_tokens=False)["input_ids"])
-            docs.append(example)
-            if total_tokens >= max_tokens:
-                break
-        raw = Dataset.from_list(docs)
+    if world_size > 1:
+        raw_stream = split_dataset_by_node(raw_stream, rank=rank, world_size=world_size)
+        rank_max_examples = max_examples // world_size
+        rank_max_tokens = max_tokens // world_size if max_tokens is not None else None
     else:
-        raw = Dataset.from_list(list(raw_stream.take(max_examples)))
+        rank_max_examples = max_examples
+        rank_max_tokens = max_tokens
 
-    # FineWeb-Edu has only a train split, carve out val and test
-    split   = raw.train_test_split(test_size=val_size + test_size, seed=42)
-    val_test = split["test"].train_test_split(test_size=test_size, seed=42)
-    splits = {
-        "train":      split["train"],
-        "validation": val_test["train"],
-        "test":       val_test["test"],
-    }
+    rank_max_docs = (
+        -(-rank_max_tokens // AVG_TOKENS_PER_DOC)  # ceil division
+        if rank_max_tokens is not None else rank_max_examples
+    )
+
+    val_stream   = raw_stream.take(val_size)
+    test_stream  = raw_stream.skip(val_size).take(test_size)
+    train_stream = raw_stream.skip(val_size + test_size).take(rank_max_docs)
+    train_stream = train_stream.shuffle(seed=42, buffer_size=10_000)
 
     def tokenize(examples):
         return tokenizer(examples["text"], add_special_tokens=False)
@@ -480,27 +504,23 @@ def load_fineweb_edu(
         return {"input_ids": chunks}
 
     def collate(batch):
-        ids = torch.stack([b["input_ids"] for b in batch])
+        ids = torch.stack([torch.as_tensor(b["input_ids"], dtype=torch.long) for b in batch])
         return ids, ids
 
-    _map_workers = map_workers if map_workers is not None else num_workers
+    def make_loader(stream) -> DataLoader:
+        ds = stream.map(tokenize, batched=True, remove_columns=stream.column_names)
+        ds = ds.map(pack, batched=True, remove_columns=["attention_mask"])
+        return DataLoader(ds, batch_size=batch_size, num_workers=0, collate_fn=collate)
 
-    def make_loader(split_name: str, shuffle: bool) -> DataLoader:
-        ds = splits[split_name]
-        # remove_columns=ds.column_names drops text + all FineWeb-Edu metadata,
-        # leaving only the tokenizer outputs (input_ids, attention_mask).
-        ds = ds.map(tokenize, batched=True, remove_columns=ds.column_names, num_proc=_map_workers)
-        ds = ds.map(pack, batched=True, remove_columns=["attention_mask"], num_proc=_map_workers)
-        ds.set_format(type="torch", columns=["input_ids"])
-        return DataLoader(
-            ds,
-            batch_size=batch_size,
-            shuffle=shuffle,
-            num_workers=num_workers,
-            collate_fn=collate,
-        )
+    train_loader = make_loader(train_stream)
+    # IterableDataset has no len(); attach an estimate (from rank_max_docs, same
+    # AVG_TOKENS_PER_DOC used for max_tokens above) so finetune() can space
+    # checkpoints through a streaming epoch instead of only at its (very late,
+    # or for an unbounded stream, never-reached-until-exhaustion) end.
+    train_loader.estimated_steps_per_epoch = max(
+        1, (rank_max_docs * AVG_TOKENS_PER_DOC // max_seq_length) // batch_size)
 
-    return make_loader("train", True), make_loader("validation", False), make_loader("test", False)
+    return train_loader, make_loader(val_stream), make_loader(test_stream)
 
 
 def flexible_model_copy(src: Union[nn.Module, dict[str, Any]], dest: nn.Module):
