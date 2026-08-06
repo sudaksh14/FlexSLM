@@ -30,6 +30,11 @@ JOBDIR = make_path(f"{PROJECT_DIR}/wandb/job_{SLURM_JOBID}")
 DATA_PATH = make_path(f"{PROJECT_DIR}/data")
 LOG_PATH = make_path(JOBDIR / 'logs')
 
+# Cluster-wide NFS scratch (same mount on every node, unlike /local_scratch which
+# is node-local) - for large derived data like the prepared FineWeb-Edu .bin
+# files, which don't fit in the ~50G free on the home quota but do fit here.
+SCRATCH_PATH = make_path("/scratch/" + os.environ.get('USER', 'skalra') if ON_CLUSTER else PROJECT_DIR / 'scratch')
+
 TRAINED_MODELS = make_path(f"{HOME}/FlexSLM/saved_models" if ON_CLUSTER else PROJECT_DIR / 'pretrained')
 CHECKPOINT_PATH = make_path(f"{HOME}/FlexSLM/checkpoints" if ON_CLUSTER else PROJECT_DIR / 'checkpoints')
 

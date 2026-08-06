@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --time=150:00:00
 #SBATCH --mem=180G
-#SBATCH --output=%x-%j.out
+#SBATCH --output=./jobs/%x-%j.out
 
 # 4x L4 on the `capacity` partition, DDP across all 4 (nccl backend, see
 # training.py's DDPStrategy + devices="auto"). cpus-per-task=16 x ntasks=4 = 64

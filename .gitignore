@@ -3,6 +3,7 @@
 atest.*
 wandb
 pretrained
+checkpoints
 figures
 jobs
 run_all6000.sh
@@ -10,6 +11,9 @@ run_eval.sh
 run_job.sh
 run_imagenet.sh
 .*
+*.out
+*.pt
+*.ckpt
 myenv
 plans
 results

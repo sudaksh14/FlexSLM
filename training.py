@@ -7,7 +7,7 @@ import random
 
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, Timer, LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger
-from pytorch_lightning.strategies import DDPStrategy
+from pytorch_lightning.strategies import DDPStrategy, FSDPStrategy
 from torch.utils.data import DataLoader
 from torch import nn
 import torch.nn.functional as F
@@ -35,6 +35,7 @@ class TrainingContext(utils.SelfDescripting):
 
     unittest_mode: bool = False
     resume: bool = True  # if a checkpoint exists at this config's path, resume from it; set False to force a fresh start
+    use_fsdp: bool = False  # shard params/grads/optimizer state across GPUs (FULL_SHARD) instead of full DDP replication
 
     def make_optimizer(self, model) -> torch.optim.Optimizer:
         raise NotImplementedError()
@@ -522,7 +523,15 @@ def finetune(model: pl.LightningModule, config: TrainingContext, conf_descriptio
         steps_per_epoch = getattr(train_loader, 'estimated_steps_per_epoch', None)
     val_check_interval = max(1, steps_per_epoch // 20) if steps_per_epoch else 1.0
 
-    ddp = DDPStrategy(process_group_backend='nccl', find_unused_parameters=True)
+    if config.use_fsdp:
+        # FULL_SHARD (ZeRO-3 equivalent): params/grads/optimizer state sharded
+        # across GPUs instead of fully replicated per-rank like DDP. state_dict_type
+        # stays 'full' (the default) so checkpoints remain a single unsharded
+        # state_dict - compatible with the existing resume/save_model/warm-start
+        # loading code, which all expect that format.
+        strategy = FSDPStrategy(process_group_backend='nccl')
+    else:
+        strategy = DDPStrategy(process_group_backend='nccl', find_unused_parameters=True)
     trainer = pl.Trainer(
         **kwargs,
         max_epochs=config.epochs,
@@ -533,7 +542,7 @@ def finetune(model: pl.LightningModule, config: TrainingContext, conf_descriptio
         accelerator="gpu",
         devices="auto",
         num_nodes=utils.get_num_nodes(),
-        strategy=ddp,
+        strategy=strategy,
         precision='bf16-mixed'
     )
 

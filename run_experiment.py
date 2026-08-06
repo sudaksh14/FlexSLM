@@ -6,6 +6,7 @@ from config.hardware import HARDWARE, DEFAULT_HARDWARE_CONFIG
 from config.experiments import CONFIGS
 from training import BaseTrainer
 import config.hardware
+import utils
 
 
 def resolve_from_str(config, start=CONFIGS, return_on_index_error=False) -> Callable[[], BaseTrainer]:
@@ -74,3 +75,12 @@ if __name__ == "__main__":
         res(conf)
     elif command == "listcommand":
         print_all_conf_commands(res, conf)
+    elif command == "datainfo":
+        # Tells experiment_job.sh whether this config needs the one-off
+        # prepare_fineweb.py pass, and with which tokenizer.
+        # Prints "memmap <hf-tokenizer-name>" or "stream".
+        loader = getattr(res.training_context, 'loader_function', None)
+        if getattr(loader, 'func', None) is utils.load_fineweb_edu_memmap:
+            print(f"memmap {loader.keywords.get('tokenizer_name', 'JackFram/llama-160m')}")
+        else:
+            print("stream")

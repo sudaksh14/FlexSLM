@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --time=150:00:00
 #SBATCH --mem=300G
-#SBATCH --output=%x-%j.out
+#SBATCH --output=./jobs/%x-%j.out
 
 # Pick which SLM to train by uncommenting exactly ONE of the CONFIG= lines
 # below, then: sbatch submit_flexllama_choose_slm.sh

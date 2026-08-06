@@ -12,6 +12,7 @@ from torchvision.datasets import CIFAR10, CIFAR100, ImageFolder
 from sklearn.metrics import accuracy_score
 from torch.utils.data import DataLoader, TensorDataset
 from torch import nn
+import numpy as np
 import torch
 import tqdm
 from timm.data import Mixup
@@ -407,6 +408,131 @@ def load_openwebtext(
         )
 
     return make_loader("train", True), make_loader("validation", False), make_loader("test", False)
+
+
+def fineweb_bin_dir(tokenizer_name: str) -> str:
+    """Where prepare_fineweb.py writes (and load_fineweb_edu_memmap reads) the
+    pre-tokenized FineWeb-Edu binaries for a given tokenizer.
+
+    Lives under SCRATCH_PATH (cluster-wide NFS, currently ~3.2T free), not
+    DATA_PATH (the home quota, ~50G free) - a single teacher's corpus at the
+    nanochat-recipe horizon can be tens of GB (e.g. Qwen2.5-1.5B needs 69GiB,
+    since its 151936 vocab forces uint32), which the home quota can't absorb
+    across more than one or two teachers.
+    """
+    slug = tokenizer_name.replace('/', '__')
+    return str(paths.SCRATCH_PATH / 'fineweb_bin' / slug)
+
+
+class _MemmapWindowDataset(torch.utils.data.Dataset):
+    """
+    Map-style view over a flat token binary: item i is a deterministic random
+    window of length max_seq_length.
+
+    Map-style (rather than an iterable stream) so that the dataset has a real
+    length - Lightning's DistributedSampler then shards windows across DDP ranks,
+    epochs are well defined, and val_check_interval / checkpoint cadence work off
+    an exact step count instead of an estimate. Offsets are derived from
+    (seed, index) so the sampling is reproducible and resuming at a given index
+    replays exactly the same windows.
+
+    The memmap is opened lazily per process so DataLoader workers (and DDP ranks)
+    each get their own handle rather than inheriting one across a fork.
+    """
+
+    def __init__(self, path: str, dtype: str, max_seq_length: int,
+                 num_windows: int, seed: int = 1337):
+        self.path = path
+        self.dtype = np.dtype(dtype)
+        self.max_seq_length = max_seq_length
+        self.num_windows = num_windows
+        self.seed = seed
+        self.n_tokens = os.path.getsize(path) // self.dtype.itemsize
+        if self.n_tokens <= max_seq_length + 1:
+            raise ValueError(
+                f"{path} holds {self.n_tokens} tokens, too few for max_seq_length="
+                f"{max_seq_length}. Re-run prepare_fineweb.py with a larger --max-tokens.")
+        self._data = None
+
+    def _tokens(self):
+        if self._data is None:
+            self._data = np.memmap(self.path, dtype=self.dtype, mode='r')
+        return self._data
+
+    def __len__(self) -> int:
+        return self.num_windows
+
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        data = self._tokens()
+        rng = np.random.default_rng(self.seed + idx)
+        start = int(rng.integers(0, self.n_tokens - self.max_seq_length - 1))
+        window = data[start:start + self.max_seq_length].astype(np.int64)
+        return torch.from_numpy(window)
+
+
+def load_fineweb_edu_memmap(
+    max_seq_length: int = 1024,
+    batch_size: int = 8,
+    num_workers: int = 4,
+    tokenizer_name: str = "JackFram/llama-160m",
+    data_dir: str = None,
+    val_batches: int = 200,
+    test_batches: int = 200,
+    seed: int = 1337,
+    **_ignored,
+) -> tuple[DataLoader, DataLoader, DataLoader]:
+    """
+    Memmap pipeline: reads pre-tokenized FineWeb-Edu binaries written by
+    prepare_fineweb.py, sampling random windows out of them.
+
+    Compared to load_fineweb_edu (the streaming pipeline, still the default):
+    tokenization happens once offline instead of on every epoch, shuffling is
+    truly uniform over the whole corpus rather than an approximation over a
+    buffer, resident memory is flat (the OS pages the file in and out), and
+    resuming replays the same windows because offsets are a function of the
+    sample index. The cost is a one-off prepare pass and a tokenizer-specific
+    copy on disk.
+
+    Raises with the exact command to run if the binaries are missing, since the
+    prepare step is easy to forget.
+    """
+    import json
+
+    data_dir = data_dir or fineweb_bin_dir(tokenizer_name)
+    meta_path = os.path.join(data_dir, 'meta.json')
+    if not os.path.exists(meta_path):
+        raise FileNotFoundError(
+            f"No pre-tokenized FineWeb-Edu found at {data_dir}. Build it first:\n"
+            f"  sbatch prepare_fineweb.sh {tokenizer_name}\n"
+            f"or use the streaming pipeline instead (dataset='fineweb-edu')."
+        )
+    with open(meta_path) as f:
+        meta = json.load(f)
+
+    def collate(batch):
+        ids = torch.stack(batch)
+        return ids, ids
+
+    def make_loader(split: str, num_windows: int, shuffle: bool, split_seed: int):
+        ds = _MemmapWindowDataset(
+            os.path.join(data_dir, f'{split}.bin'), meta['dtype'],
+            max_seq_length, num_windows, seed=split_seed)
+        return DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
+                          num_workers=num_workers, collate_fn=collate,
+                          pin_memory=True, drop_last=True)
+
+    # One "epoch" of training = each token seen about once on average.
+    train_windows = max(1, meta['train_tokens'] // max_seq_length)
+    # val and test are disjoint slices of the same held-out binary, kept small
+    # and fixed so evaluation is cheap and comparable across runs.
+    val_windows = val_batches * batch_size
+    test_windows = test_batches * batch_size
+
+    return (
+        make_loader('train', train_windows, True, seed),
+        make_loader('val', val_windows, False, seed + 1),
+        make_loader('val', test_windows, False, seed + 2),
+    )
 
 
 def load_fineweb_edu(

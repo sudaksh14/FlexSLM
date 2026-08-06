@@ -9,6 +9,7 @@ import torch
 import torch.optim as optim
 
 from training import FlexLMTrainer, FlexLMKDTrainer
+from training_memopt import MemOptFlexLMKDTrainer, memopt
 
 
 class GPTTrainingContext(FlexTrainingContext):
@@ -68,6 +69,10 @@ class LLaMATrainingContext(GPTTrainingContext):
                              batch_size=batch_size,
                              max_examples=max_examples,
                              max_tokens=max_tokens)
+        elif dataset == "fineweb-edu-memmap":
+            loader = partial(utils.load_fineweb_edu_memmap,
+                             max_seq_length=max_seq_length,
+                             batch_size=batch_size)
         else:
             loader = partial(utils.load_wikitext, dataset_name=dataset,
                              max_seq_length=max_seq_length,
@@ -95,6 +100,11 @@ class LLaMAKDTrainingContext(FlexLMKDTrainingContext):
                              max_tokens=max_tokens,
                              tokenizer_name=tokenizer_name,
                              map_workers=map_workers)
+        elif dataset == "fineweb-edu-memmap":
+            loader = partial(utils.load_fineweb_edu_memmap,
+                             max_seq_length=max_seq_length,
+                             batch_size=batch_size,
+                             tokenizer_name=tokenizer_name)
         else:
             loader = partial(utils.load_wikitext, dataset_name=dataset,
                              max_seq_length=max_seq_length,
@@ -219,6 +229,44 @@ def _label_levels(kd_kwargs: dict, n_levels: int) -> dict:
     return kd_kwargs
 
 
+def flexllama_scaling_params(cfg: FlexLLaMAConfig) -> int:
+    """
+    Parameter count at the max flex level using nanochat's scaling-law convention:
+    transformer blocks + lm_head, with token embeddings excluded (Kaplan-style).
+    See nanochat/nanochat/gpt.py:num_scaling_params.
+
+    Computed from the config dims rather than by building the model, so it is
+    cheap enough to evaluate at import time. The max level is the right unit
+    because every smaller level is a slice of those same tensors.
+
+    Note: nanochat's lm_head is always untied, so it counts as its own group. We
+    count hidden*vocab_size here whether or not tie_embeddings is set, keeping the
+    output projection in the horizon - it dominates FLOPs at Qwen-scale vocabs.
+    """
+    hidden = list(cfg.hidden_dims)[-1]
+    heads = list(cfg.num_heads)[-1]
+    kv_heads = list(cfg.num_kv_heads)[-1]
+    inter = list(cfg.intermediate_dims)[-1]
+    kv_dim = kv_heads * (hidden // heads)
+
+    attn = 2 * hidden * hidden + 2 * kv_dim * hidden   # q,o + k,v
+    if cfg.qkv_bias:
+        attn += hidden + 2 * kv_dim
+    mlp = 3 * hidden * inter                            # gate, up, down (SwiGLU)
+    norms = 2 * hidden                                  # input + post-attention RMSNorm
+    lm_head = hidden * cfg.vocab_size
+    return cfg.num_layers * (attn + mlp + norms) + lm_head
+
+
+def nanochat_token_horizon(cfg: FlexLLaMAConfig, data_param_ratio: float = 12) -> int:
+    """
+    Training-token budget following nanochat's recipe: tokens = ratio x scaling
+    params, trained for a single pass rather than many epochs over a small slice.
+    Their default ratio is 12 and runs/speedrun.sh uses 8; Chinchilla is 20.
+    """
+    return int(data_param_ratio * flexllama_scaling_params(cfg))
+
+
 def make_flexllama_kd(teacher: str, **kd_kwargs) -> TrainerBuilder:
     """Builds a FlexLLaMA KD TrainerBuilder for the named entry in TEACHER_PRESETS.
     Student starts from random init and is trained purely via KD logits."""
@@ -237,6 +285,7 @@ def make_flexllama_kd(teacher: str, **kd_kwargs) -> TrainerBuilder:
 
 
 def make_flexllama_warmstart_kd(teacher: str, n_levels: int = 3, min_frac: float = None,
+                                 memory_optimized: bool = False, loss_chunk_size: int = 1024,
                                  **kd_kwargs) -> TrainerBuilder:
     """Same KD training algorithm as make_flexllama_kd, but the student's max
     level is built to match the teacher's real architecture exactly and is
@@ -248,6 +297,12 @@ def make_flexllama_warmstart_kd(teacher: str, n_levels: int = 3, min_frac: float
     see _flex_llama_dims). Training all n_levels every step gets expensive as
     n_levels grows; pass num_levels_per_step in kd_kwargs to sample a subset per
     step instead of training every level each time.
+
+    memory_optimized swaps in training_memopt.MemOptFlexLMKDTrainer (chunked loss
+    + activation checkpointing). The training algorithm is unchanged and the
+    gradients are identical - it only lowers peak memory, which is what the
+    1.5B-class teachers need to fit. loss_chunk_size trades peak memory against
+    the number of chunked loss passes.
     """
     preset = TEACHER_PRESETS[teacher]
     missing = [f for f in _WARMSTART_FIELDS if f not in preset]
@@ -260,8 +315,8 @@ def make_flexllama_warmstart_kd(teacher: str, n_levels: int = 3, min_frac: float
     hidden_dims, num_heads, num_kv_heads, intermediate_dims = _flex_llama_dims(
         **preset["dims_spec"], n_levels=n_levels, min_frac=min_frac)
     kd_kwargs = _label_levels(kd_kwargs, n_levels)
-    return TrainerBuilder(
-        FlexLMKDTrainer,
+    builder = TrainerBuilder(
+        MemOptFlexLMKDTrainer if memory_optimized else FlexLMKDTrainer,
         FlexLLaMAConfig(
             vocab_size=preset["vocab_size"],
             num_layers=preset["num_layers"],
@@ -281,6 +336,9 @@ def make_flexllama_warmstart_kd(teacher: str, n_levels: int = 3, min_frac: float
             **kd_kwargs,
         ),
     )
+    if memory_optimized:
+        memopt(builder.training_context, loss_chunk_size=loss_chunk_size)
+    return builder
 
 
 CONFIGS = {
@@ -625,8 +683,131 @@ CONFIGS = {
         'fineweb.kd_qwen25_1p5b_warmstart': make_flexllama_warmstart_kd(
             "qwen2.5-1.5b",
             kd_lambda=0.5, kd_temperature=2.0, epochs=10, patience=3,
-            batch_size=4,  # 1.5B student+teacher was OOMing at 43.86GB/47.4GB with batch_size=8
+            # DDP + batch_size=4 still OOM'd on the KD softmax/KL-div step (46.15GB/47.4GB).
+            # FSDP would help but is incompatible with _step()'s per-level manual_backward
+            # loop (FSDP hook state machine breaks on >1 forward/backward per training_step -
+            # see use_fsdp on TrainingContext). Staying on DDP, cutting batch_size further instead.
+            batch_size=2,
             wandb_project_name="FlexLLaMA_fineweb_kd_qwen25_1p5b_warmstart",
+        ),
+        # Memory-optimized variants: identical algorithm and gradients to the configs
+        # above (see training_memopt.py), just lower peak memory - which is what lets
+        # the 1.5B/1.7B-class teachers keep a usable batch_size instead of shrinking it.
+        'fineweb.kd_qwen25_1p5b_warmstart_memopt': make_flexllama_warmstart_kd(
+            "qwen2.5-1.5b", memory_optimized=True, loss_chunk_size=512,
+            kd_lambda=0.5, kd_temperature=2.0, epochs=10, patience=3,
+            batch_size=4,
+            wandb_project_name="FlexLLaMA_fineweb_kd_qwen25_1p5b_warmstart_memopt",
+        ),
+        'fineweb.kd_smollm2_1p7b_warmstart_memopt': make_flexllama_warmstart_kd(
+            "smollm2-1.7b", memory_optimized=True, loss_chunk_size=512,
+            kd_lambda=0.5, kd_temperature=2.0, epochs=10, patience=3,
+            batch_size=4,
+            wandb_project_name="FlexLLaMA_fineweb_kd_smollm2_1p7b_warmstart_memopt",
+        ),
+        'fineweb.kd_qwen25_0p5b_warmstart_memopt': make_flexllama_warmstart_kd(
+            "qwen2.5-0.5b", memory_optimized=True, loss_chunk_size=512,
+            kd_lambda=0.5, kd_temperature=2.0, epochs=10, patience=3,
+            wandb_project_name="FlexLLaMA_fineweb_kd_qwen25_0p5b_warmstart_memopt",
+        ),
+        'fineweb.kd_tinyllama_warmstart_memopt': make_flexllama_warmstart_kd(
+            "tinyllama-1.1b", memory_optimized=True, loss_chunk_size=512,
+            kd_lambda=0.5, kd_temperature=2.0, epochs=10, patience=3,
+            wandb_project_name="FlexLLaMA_fineweb_kd_tinyllama_warmstart_memopt",
+        ),
+        # --- memmap data pipeline (dataset="fineweb-edu-memmap") ---
+        # Same training algorithm as the streaming configs above; only the data
+        # pipeline differs - pre-tokenized .bin files read via np.memmap instead of
+        # re-tokenizing the HF stream every epoch. Requires a one-off prepare pass
+        # per tokenizer first:  sbatch prepare_fineweb.sh <hf-tokenizer-name>
+        'fineweb_mm.kd_lambda05': TrainerBuilder(
+            FlexLMKDTrainer,
+            FlexLLaMAConfig(pretrained_hf_model="JackFram/llama-160m"),
+            LLaMAKDTrainingContext(
+                dataset="fineweb-edu-memmap",
+                kd_lambda=0.5, kd_temperature=2.0, epochs=3, patience=3,
+                wandb_project_name="FlexLLaMA_finewebmm_kd_lambda05",
+            ),
+        ),
+        'fineweb_mm.kd_tinyllama_warmstart': make_flexllama_warmstart_kd(
+            "tinyllama-1.1b", dataset="fineweb-edu-memmap",
+            kd_lambda=0.5, kd_temperature=2.0, epochs=3, patience=3,
+            wandb_project_name="FlexLLaMA_finewebmm_kd_tinyllama_warmstart",
+        ),
+        'fineweb_mm.kd_qwen25_1p5b_warmstart_memopt': make_flexllama_warmstart_kd(
+            "qwen2.5-1.5b", dataset="fineweb-edu-memmap",
+            memory_optimized=True, loss_chunk_size=512,
+            kd_lambda=0.5, kd_temperature=2.0, epochs=3, patience=3,
+            batch_size=4,
+            wandb_project_name="FlexLLaMA_finewebmm_kd_qwen25_1p5b_warmstart_memopt",
+        ),
+        'fineweb_mm.kd_smollm2_1p7b_warmstart_memopt': make_flexllama_warmstart_kd(
+            "smollm2-1.7b", dataset="fineweb-edu-memmap",
+            memory_optimized=True, loss_chunk_size=512,
+            kd_lambda=0.5, kd_temperature=2.0, epochs=3, patience=3,
+            batch_size=4,
+            wandb_project_name="FlexLLaMA_finewebmm_kd_smollm2_1p7b_warmstart_memopt",
+        ),
+        # --- nanochat recipe (fineweb_nc.*) ---
+        # One pass over a horizon-sized corpus instead of several passes over a
+        # small slice: tokens = data_param_ratio x scaling params (nanochat uses
+        # 12 by default, 8 in runs/speedrun.sh; Chinchilla is 20), and epochs=1.
+        # Each needs its corpus prepared first at exactly that budget - the
+        # commands are in the comments below, and the horizons come from
+        # nanochat_token_horizon() (see test/test_nanochat_horizon.py).
+        #
+        # patience=1 because with a single epoch early stopping can only trigger
+        # on the mid-epoch validations (every ~1/20th of the run).
+        'fineweb_nc.kd_lambda05_r12': TrainerBuilder(
+            FlexLMKDTrainer,
+            FlexLLaMAConfig(pretrained_hf_model="JackFram/llama-160m"),
+            LLaMAKDTrainingContext(
+                dataset="fineweb-edu-memmap",
+                kd_lambda=0.5, kd_temperature=2.0, epochs=1, patience=1,
+                # sbatch prepare_fineweb.sh JackFram/llama-160m 1.654e9
+                wandb_project_name="FlexLLaMA_finewebnc_kd_lambda05_r12",
+            ),
+        ),
+        'fineweb_nc.kd_smollm2_360m_warmstart_r12': make_flexllama_warmstart_kd(
+            "smollm2-360m", dataset="fineweb-edu-memmap",
+            kd_lambda=0.5, kd_temperature=2.0, epochs=1, patience=1,
+            # sbatch prepare_fineweb.sh HuggingFaceTB/SmolLM2-360M 4.342e9
+            wandb_project_name="FlexLLaMA_finewebnc_kd_smollm2_360m_r12",
+        ),
+        'fineweb_nc.kd_qwen25_0p5b_warmstart_r12': make_flexllama_warmstart_kd(
+            "qwen2.5-0.5b", dataset="fineweb-edu-memmap",
+            memory_optimized=True, loss_chunk_size=512,
+            kd_lambda=0.5, kd_temperature=2.0, epochs=1, patience=1,
+            # sbatch prepare_fineweb.sh Qwen/Qwen2.5-0.5B 5.928e9   (22 GiB, uint32)
+            wandb_project_name="FlexLLaMA_finewebnc_kd_qwen25_0p5b_r12",
+        ),
+        'fineweb_nc.kd_tinyllama_warmstart_r8': make_flexllama_warmstart_kd(
+            "tinyllama-1.1b", dataset="fineweb-edu-memmap",
+            memory_optimized=True, loss_chunk_size=512,
+            kd_lambda=0.5, kd_temperature=2.0, epochs=1, patience=1,
+            # ratio 8 (speedrun setting), not 12: ratio 12 would need 12.4B tokens,
+            # past what sample-10BT holds.
+            # sbatch prepare_fineweb.sh TinyLlama/TinyLlama-1.1B-Chat-v1.0 8.276e9
+            wandb_project_name="FlexLLaMA_finewebnc_kd_tinyllama_r8",
+        ),
+        # These two exceed sample-10BT (10B tokens) at ratio 12, so prepare needs
+        # sample-100BT - and the corpus (69GiB / 38GiB) needs SCRATCH_PATH, not the
+        # home quota (see utils.fineweb_bin_dir). Both now fit in the 3.2T free there.
+        'fineweb_nc.kd_qwen25_1p5b_warmstart_r12': make_flexllama_warmstart_kd(
+            "qwen2.5-1.5b", dataset="fineweb-edu-memmap",
+            memory_optimized=True, loss_chunk_size=512,
+            kd_lambda=0.5, kd_temperature=2.0, epochs=1, patience=1,
+            batch_size=4,
+            # sbatch prepare_fineweb.sh Qwen/Qwen2.5-1.5B 1.8524553216e10 sample-100BT   (69.0 GiB, uint32)
+            wandb_project_name="FlexLLaMA_finewebnc_kd_qwen25_1p5b_r12",
+        ),
+        'fineweb_nc.kd_smollm2_1p7b_warmstart_r12': make_flexllama_warmstart_kd(
+            "smollm2-1.7b", dataset="fineweb-edu-memmap",
+            memory_optimized=True, loss_chunk_size=512,
+            kd_lambda=0.5, kd_temperature=2.0, epochs=1, patience=1,
+            batch_size=4,
+            # sbatch prepare_fineweb.sh HuggingFaceTB/SmolLM2-1.7B 2.0536492032e10 sample-100BT   (38.3 GiB, uint16)
+            wandb_project_name="FlexLLaMA_finewebnc_kd_smollm2_1p7b_r12",
         ),
         'fineweb.kd_lambda05_5levels': TrainerBuilder(
             FlexLMKDTrainer,
