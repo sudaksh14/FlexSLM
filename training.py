@@ -445,6 +445,59 @@ class SimpleTrainer(pl.LightningModule, BaseTrainer):
 logger = None
 
 
+def _print_experiment_banner(conf_description, model_config, config, steps_per_epoch, steps_are_exact) -> None:
+    """
+    Prints a one-glance summary (config name, model/teacher, dataset size) at the
+    top of the job's output log. Rank-0 only, so a 4-GPU DDP job doesn't print it
+    4 times - identifying which SLURM_PROCID is rank 0 has to happen the same way
+    utils.load_fineweb_edu does it (torch.distributed isn't initialized yet here,
+    this runs before trainer.fit()), via the env var SLURM sets per task.
+    """
+    if int(os.environ.get('SLURM_PROCID', 0)) != 0:
+        return
+
+    loader = getattr(config, 'loader_function', None)
+    loader_kwargs = getattr(loader, 'keywords', {}) or {}
+    pipeline = getattr(getattr(loader, 'func', None), '__name__', 'unknown')
+    batch_size = loader_kwargs.get('batch_size')
+    max_seq_length = loader_kwargs.get('max_seq_length')
+
+    hidden_dims = getattr(model_config, 'hidden_dims', None)
+    num_levels = (len(hidden_dims) if hidden_dims else getattr(model_config, 'max_level', lambda: None)() or 0)
+    max_width = hidden_dims[-1] if hidden_dims else None
+    pretrained = getattr(model_config, 'pretrained_hf_model', None)
+
+    teacher = getattr(config, 'teacher_hf_model', None)
+    kd_lambda = getattr(config, 'kd_lambda', None)
+
+    tokens_per_epoch = (steps_per_epoch * batch_size * max_seq_length
+                        if steps_per_epoch and batch_size and max_seq_length else None)
+    tokens_label = "tokens/epoch (exact)" if steps_are_exact else "tokens/epoch (estimate)"
+
+    lines = [
+        "=" * 88,
+        f"EXPERIMENT: {conf_description}",
+        f"  Model:    {type(model_config).__name__}  vocab={getattr(model_config, 'vocab_size', '?')}"
+        f"  layers={getattr(model_config, 'num_layers', '?')}  levels={num_levels}  max_width={max_width}",
+    ]
+    if pretrained:
+        lines.append(f"  Warm start: {pretrained}")
+    if teacher:
+        lines.append(f"  KD teacher: {teacher}  (kd_lambda={kd_lambda}, kd_temperature={getattr(config, 'kd_temperature', '?')})")
+    lines.append(
+        f"  Data:     pipeline={pipeline}  tokenizer={loader_kwargs.get('tokenizer_name', '?')}"
+        f"  batch_size={batch_size}  max_seq_length={max_seq_length}"
+    )
+    if tokens_per_epoch:
+        lines.append(f"            {tokens_per_epoch:,} {tokens_label}  ({steps_per_epoch:,} steps/epoch)")
+    lines.append(
+        f"  Training: epochs={getattr(config, 'epochs', '?')}  patience={getattr(config, 'patience', '?')}"
+        f"  resume={getattr(config, 'resume', '?')}  W&B project={getattr(config, 'wandb_project_name', None)}"
+    )
+    lines.append("=" * 88)
+    print("\n".join(lines), flush=True)
+
+
 def finetune(model: pl.LightningModule, config: TrainingContext, conf_description, model_config) -> pl.LightningModule:
     global logger
 
@@ -519,9 +572,13 @@ def finetune(model: pl.LightningModule, config: TrainingContext, conf_descriptio
     # streaming loaders instead carry an estimate (see utils.load_fineweb_edu).
     try:
         steps_per_epoch = len(train_loader)
+        steps_are_exact = True
     except TypeError:
         steps_per_epoch = getattr(train_loader, 'estimated_steps_per_epoch', None)
+        steps_are_exact = False
     val_check_interval = max(1, steps_per_epoch // 20) if steps_per_epoch else 1.0
+
+    _print_experiment_banner(conf_description, model_config, config, steps_per_epoch, steps_are_exact)
 
     if config.use_fsdp:
         # FULL_SHARD (ZeRO-3 equivalent): params/grads/optimizer state sharded
