@@ -15,13 +15,13 @@ from lm_eval.utils import make_table
 @register_model("flexgpt")
 class FlexGPTLMEval(LM):
 
-    def __init__(self, model, level: int, device: str = "cuda"):
+    def __init__(self, model, level: int, device: str = "cuda", tokenizer_name: str = "gpt2"):
         super().__init__()
         self.model = model.to(device)
         self.model.set_level_use(level)
         self.model.eval()
         self._device = device
-        self._tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
+        self._tokenizer = GPT2TokenizerFast.from_pretrained(tokenizer_name)
         self._tokenizer.pad_token = self._tokenizer.eos_token
 
     @property
@@ -125,14 +125,14 @@ class FlexGPTLMEval(LM):
 @register_model("flexllama")
 class FlexLLaMALMEval(FlexGPTLMEval):
 
-    def __init__(self, model, level: int, device: str = "cuda"):
+    def __init__(self, model, level: int, device: str = "cuda", tokenizer_name: str = "JackFram/llama-160m"):
         # Call LM.__init__ directly to skip GPT2TokenizerFast setup in parent
         LM.__init__(self)
         self.model = model.to(device)
         self.model.set_level_use(level)
         self.model.eval()
         self._device = device
-        self._tokenizer = AutoTokenizer.from_pretrained("JackFram/llama-160m")
+        self._tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
 
@@ -140,6 +140,7 @@ class FlexLLaMALMEval(FlexGPTLMEval):
 if __name__ == "__main__":
     from run_experiment import resolve_from_str
     from utils import load_model
+    from eval_wikitext103 import resolve_tokenizer_name
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="flexgpt,wikitext103.gpt2pretrained")
@@ -147,6 +148,8 @@ if __name__ == "__main__":
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--output", default="results/flexgpt_eval.json")
+    parser.add_argument("--tokenizer", default=None,
+                        help="override the auto-detected tokenizer (KD teacher / warm-start source / gpt2 or llama-160m)")
     args = parser.parse_args()
 
     builder = resolve_from_str(args.config)
@@ -155,10 +158,22 @@ if __name__ == "__main__":
 
     is_llama = args.config.startswith("flexllama")
     EvalClass = FlexLLaMALMEval if is_llama else FlexGPTLMEval
+    default_tokenizer = "JackFram/llama-160m" if is_llama else "gpt2"
+    tokenizer_name = resolve_tokenizer_name(builder, args.tokenizer, default=default_tokenizer)
+
+    tokenizer_vocab_size = len(AutoTokenizer.from_pretrained(tokenizer_name))
+    if tokenizer_vocab_size != builder.model_config.vocab_size:
+        raise ValueError(
+            f"Tokenizer/model vocab mismatch: {tokenizer_name!r} has "
+            f"{tokenizer_vocab_size} tokens, but {args.config} expects "
+            f"vocab_size={builder.model_config.vocab_size}. Pass --tokenizer to "
+            f"override (this would otherwise crash as an out-of-bounds CUDA gather)."
+        )
+    print(f"Loading model: {args.config}  (tokenizer={tokenizer_name})")
 
     all_results = {}
     for level in range(model.max_level() + 1):
-        lm = EvalClass(model, level=level, device=args.device)
+        lm = EvalClass(model, level=level, device=args.device, tokenizer_name=tokenizer_name)
         results = evaluator.simple_evaluate(
             model=lm,
             tasks=args.tasks.split(","),

@@ -5,7 +5,7 @@
 #SBATCH --gpus-per-node=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32
-#SBATCH --time=03:00:00
+#SBATCH --time=12:00:00
 #SBATCH --mem=80G
 #SBATCH --output=./jobs/%x-%j.out
 
@@ -21,6 +21,9 @@
 #          my_env; note: it pins datasets==3.6.0, downgraded from 4.5.0 - the
 #          streaming/memmap FineWeb-Edu pipeline was re-verified against that
 #          exact version and is unaffected).
+#          One flex level of the full 8-task default suite took ~3h on a 3-level
+#          model (measured on a 160M-max-width FlexLLaMA) - budget --time
+#          accordingly for models with more levels, or narrow --tasks.
 #
 # Usage:
 #   sbatch eval_job.sh wiki <config> [dataset] [batch_size]

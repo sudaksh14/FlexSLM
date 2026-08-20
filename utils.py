@@ -303,11 +303,18 @@ def load_wikitext(
     batch_size: int = 8,
     num_workers: int = 4,
     cache_dir: str = None,
+    tokenizer_name: str = "gpt2",
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
     """
-    Downloads (or loads from cache) a WikiText dataset, tokenises with the GPT-2
-    tokeniser, packs sequences to max_seq_length with no padding, and returns
+    Downloads (or loads from cache) a WikiText dataset, tokenises with the given
+    tokenizer, packs sequences to max_seq_length with no padding, and returns
     (train_loader, val_loader, test_loader).
+
+    tokenizer_name defaults to "gpt2" (matches FlexGPT / vocab_size=50257). Pass
+    the model's actual training tokenizer for anything else (e.g. FlexLLaMA
+    configs use a range of vocabs) - tokenizing with the wrong one silently
+    produces token ids outside the model's embedding table, which crashes as an
+    out-of-bounds CUDA gather deep in the model rather than a clear error here.
 
     Each batch is a tuple (input_ids, input_ids) of shape [B, max_seq_length].
     Labels are the same as inputs; the loss function shifts them by one position.
@@ -316,7 +323,7 @@ def load_wikitext(
     from transformers import AutoTokenizer
     from torch.utils.data import Dataset as TorchDataset
 
-    tokenizer = AutoTokenizer.from_pretrained("gpt2", cache_dir=cache_dir)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, cache_dir=cache_dir)
     raw = load_dataset("wikitext", dataset_name, cache_dir=cache_dir)
 
     def tokenize(examples):
