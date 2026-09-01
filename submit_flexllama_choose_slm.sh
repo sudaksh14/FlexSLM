@@ -22,26 +22,32 @@
 # CONFIG=flexllama,fineweb.kd_lambda05_5levels               # same, 5 flex levels
 
 # --- TinyLlama-1.1B (GQA 32/4 heads) ---
-# CONFIG=flexllama,fineweb.kd_tinyllama                      # KD-only, random-init student
 # CONFIG=flexllama,fineweb.kd_tinyllama_warmstart              # warm-started, 3 levels (default)
 # CONFIG=flexllama,fineweb.kd_tinyllama_warmstart_5levels    # warm-started, 5 levels
 # CONFIG=flexllama,fineweb.kd_tinyllama_warmstart_7levels    # warm-started, 7 levels
 # CONFIG=flexllama,fineweb.kd_tinyllama_warmstart_10levels   # warm-started, 10 levels
+# CONFIG=flexllama,fineweb.kd_tinyllama_warmstart_bigteacher  # warm-started self, KD teacher=Llama-2-7b (same vocab, gated on HF)
 
 # --- SmolLM2 (tied embeddings) ---
-# CONFIG=flexllama,fineweb.kd_smollm2_360m                   # 360M, KD-only, random-init student
+# CONFIG=flexllama,fineweb.kd_smollm2_135m_warmstart         # 135M, warm-started
 # CONFIG=flexllama,fineweb.kd_smollm2_360m_warmstart         # 360M, warm-started
-# CONFIG=flexllama,fineweb.kd_smollm2_1p7b                   # 1.7B, KD-only, random-init student
 # CONFIG=flexllama,fineweb.kd_smollm2_1p7b_warmstart         # 1.7B, warm-started
 
 # --- Qwen2.5 (tied embeddings + biased q/k/v projections) ---
-# CONFIG=flexllama,fineweb.kd_qwen25_0p5b                    # 0.5B, KD-only, random-init student
 # CONFIG=flexllama,fineweb.kd_qwen25_0p5b_warmstart          # 0.5B, warm-started
-# CONFIG=flexllama,fineweb.kd_qwen25_1p5b                    # 1.5B, KD-only, random-init student
 CONFIG=flexllama,fineweb.kd_qwen25_1p5b_warmstart           # 1.5B, warm-started
 
-# --- Llama-3.2-1B (gated on HF: needs license accepted + HF_TOKEN set) ---
-# CONFIG=flexllama,fineweb.kd_llama32_1b                     # KD-only only - dims unverified, no warm-start preset
+# --- Qwen2.5-Coder (same arch as Qwen2.5, code-tuned checkpoints) ---
+# CONFIG=flexllama,fineweb.kd_qwen25coder_0p5b_warmstart              # 0.5B, warm-started self
+# CONFIG=flexllama,fineweb.kd_qwen25coder_1p5b_warmstart              # 1.5B, warm-started self
+# CONFIG=flexllama,fineweb.kd_qwen25coder_0p5b_warmstart_bigteacher   # warm-started self (0.5B), KD teacher=Qwen2.5-Coder-1.5B
+
+# NOTE: Llama-3.2-1B/3B and Llama-3.1-8B are NOT offered here yet - all Llama-3.x
+# checkpoints use the "llama3" rope_scaling extension on top of rope_theta, which
+# flex_modules.rope_attention.RoPEAttention does not implement. Warm-starting one
+# would copy correct weights but apply a mismatched rotary schedule. Their
+# TEACHER_PRESETS entries exist for when that's implemented; no warm-start-capable
+# experiment references them until then.
 
 if [ -z "$CONFIG" ]; then
     echo "ERROR: no CONFIG selected - uncomment exactly one CONFIG= line in $0" >&2

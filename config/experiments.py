@@ -173,9 +173,25 @@ def _flex_llama_dims(hidden, heads, kv_heads, intermediate, n_levels=3, min_frac
 # Entries with full architecture fields (num_layers/hidden_dims/... below) support
 # pretrained_hf_model warm-starting via make_flexllama_warmstart_kd - the student's
 # max level is sized to match the checkpoint exactly, per utils.load_llama_weights_
-# into_flexllama's validation. llama3.2-1b is gated on HF (needs license + HF_TOKEN)
-# so its dims are unverified here; it's KD-only via make_flexllama_kd until confirmed
-# with llama_model_param_fetch.py.
+# into_flexllama's validation. llama3.2-1b/3b are gated on HF (need license + HF_TOKEN)
+# so their dims are unverified here; they're KD-only via make_flexllama_kd until
+# confirmed with llama_model_param_fetch.py.
+#
+# llama2-7b and llama3.1-8b are KD-teacher-only by design, not just unverified:
+# at 7-8B they're too wide to be warm-started as the flex student itself on this
+# hardware, so no dims_spec is provided for them. KD-only teacher loading (see
+# FlexLMKDTrainer) goes through plain AutoModelForCausalLM and is architecture-
+# agnostic, so this works regardless of size or HF model_type.
+#
+# Note: flex_modules.rope_attention.RoPEAttention only implements plain RoPE
+# (single rope_theta). Llama-3.x checkpoints (3.1/3.2) were pretrained with the
+# "llama3" rope_scaling extension on top of rope_theta=500000 for long-context
+# extrapolation, which this repo does not implement. Warm-starting a Llama-3.x
+# checkpoint (via make_flexllama_warmstart_kd) would copy correct weights but
+# apply a mismatched rotary frequency schedule - do not add dims_spec for
+# llama3.2-1b/3b until RoPEAttention supports rope_scaling. KD-only training
+# against them (as teacher) is unaffected since it never touches the student's
+# RoPE math.
 TEACHER_PRESETS = {
     "llama-160m": dict(
         hf_model="JackFram/llama-160m", vocab_size=32000, num_layers=12,
@@ -188,6 +204,14 @@ TEACHER_PRESETS = {
         dims_spec=dict(hidden=2048, heads=32, kv_heads=4, intermediate=5632),
     ),
     "llama3.2-1b": dict(hf_model="meta-llama/Llama-3.2-1B", vocab_size=128256),  # gated on HF: dims unverified
+    "llama3.2-3b": dict(hf_model="meta-llama/Llama-3.2-3B", vocab_size=128256),  # gated on HF: dims unverified
+    "llama2-7b": dict(hf_model="meta-llama/Llama-2-7b-hf", vocab_size=32000),    # KD teacher only, no warm-start
+    "llama3.1-8b": dict(hf_model="meta-llama/Llama-3.1-8B", vocab_size=128256),  # KD teacher only, no warm-start
+    "smollm2-135m": dict(
+        hf_model="HuggingFaceTB/SmolLM2-135M", vocab_size=49152, num_layers=30,
+        rope_theta=100000.0, rms_norm_eps=1e-5, tie_embeddings=True, qkv_bias=False,
+        dims_spec=dict(hidden=576, heads=9, kv_heads=3, intermediate=1536),
+    ),
     "smollm2-360m": dict(
         hf_model="HuggingFaceTB/SmolLM2-360M", vocab_size=49152, num_layers=32,
         rope_theta=100000.0, rms_norm_eps=1e-5, tie_embeddings=True, qkv_bias=False,
@@ -205,6 +229,16 @@ TEACHER_PRESETS = {
     ),
     "qwen2.5-1.5b": dict(
         hf_model="Qwen/Qwen2.5-1.5B", vocab_size=151936, num_layers=28,
+        rope_theta=1000000.0, rms_norm_eps=1e-6, tie_embeddings=True, qkv_bias=True,
+        dims_spec=dict(hidden=1536, heads=12, kv_heads=2, intermediate=8960),
+    ),
+    "qwen2.5coder-0.5b": dict(
+        hf_model="Qwen/Qwen2.5-Coder-0.5B", vocab_size=151936, num_layers=24,
+        rope_theta=1000000.0, rms_norm_eps=1e-6, tie_embeddings=True, qkv_bias=True,
+        dims_spec=dict(hidden=896, heads=14, kv_heads=2, intermediate=4864),
+    ),
+    "qwen2.5coder-1.5b": dict(
+        hf_model="Qwen/Qwen2.5-Coder-1.5B", vocab_size=151936, num_layers=28,
         rope_theta=1000000.0, rms_norm_eps=1e-6, tie_embeddings=True, qkv_bias=True,
         dims_spec=dict(hidden=1536, heads=12, kv_heads=2, intermediate=8960),
     ),
@@ -286,11 +320,20 @@ def make_flexllama_kd(teacher: str, **kd_kwargs) -> TrainerBuilder:
 
 def make_flexllama_warmstart_kd(teacher: str, n_levels: int = 3, min_frac: float = None,
                                  memory_optimized: bool = False, loss_chunk_size: int = 1024,
-                                 **kd_kwargs) -> TrainerBuilder:
+                                 kd_teacher: str = None, **kd_kwargs) -> TrainerBuilder:
     """Same KD training algorithm as make_flexllama_kd, but the student's max
-    level is built to match the teacher's real architecture exactly and is
+    level is built to match `teacher`'s real architecture exactly and is
     warm-started from its pretrained weights (FlexLLaMAConfig.pretrained_hf_model),
     rather than starting from random init.
+
+    By default the same preset is also the frozen KD teacher (warm-start "self").
+    Pass kd_teacher to distill against a different, larger TEACHER_PRESETS entry
+    instead - e.g. warm-start-and-KD-self from qwen2.5-0.5b's own weights while
+    matching logits against qwen2.5-1.5b. kd_teacher must share the warm-start
+    preset's tokenizer/vocab_size: KD compares logit distributions index-for-index
+    over the vocab (see the TEACHER_PRESETS module docstring), so a vocab mismatch
+    would silently misalign student and teacher logits rather than error - this is
+    checked explicitly below since nothing else would catch it.
 
     n_levels controls how many flex levels the student has in total (min_frac at
     the bottom, the checkpoint's real size at the top, evenly spaced in between -
@@ -312,6 +355,14 @@ def make_flexllama_warmstart_kd(teacher: str, n_levels: int = 3, min_frac: float
             f"needs the full architecture spec (see llama_model_param_fetch.py). "
             f"Use make_flexllama_kd for KD-only training against this teacher."
         )
+    kd_preset = TEACHER_PRESETS[kd_teacher] if kd_teacher is not None else preset
+    if kd_preset["vocab_size"] != preset["vocab_size"]:
+        raise ValueError(
+            f"kd_teacher={kd_teacher!r} has vocab_size={kd_preset['vocab_size']}, "
+            f"which does not match warm-start preset {teacher!r}'s "
+            f"vocab_size={preset['vocab_size']}. KD requires student/teacher "
+            f"logits to line up index-for-index over a shared vocab/tokenizer."
+        )
     hidden_dims, num_heads, num_kv_heads, intermediate_dims = _flex_llama_dims(
         **preset["dims_spec"], n_levels=n_levels, min_frac=min_frac)
     kd_kwargs = _label_levels(kd_kwargs, n_levels)
@@ -331,7 +382,7 @@ def make_flexllama_warmstart_kd(teacher: str, n_levels: int = 3, min_frac: float
             pretrained_hf_model=preset["hf_model"],
         ),
         LLaMAKDTrainingContext(
-            teacher_hf_model=preset["hf_model"],
+            teacher_hf_model=kd_preset["hf_model"],
             tokenizer_name=preset["hf_model"],
             **kd_kwargs,
         ),
@@ -689,6 +740,37 @@ CONFIGS = {
             # see use_fsdp on TrainingContext). Staying on DDP, cutting batch_size further instead.
             batch_size=2,
             wandb_project_name="FlexLLaMA_fineweb_kd_qwen25_1p5b_warmstart",
+        ),
+        'fineweb.kd_smollm2_135m_warmstart': make_flexllama_warmstart_kd(
+            "smollm2-135m",
+            kd_lambda=0.5, kd_temperature=2.0, epochs=10, patience=3,
+            wandb_project_name="FlexLLaMA_fineweb_kd_smollm2_135m_warmstart",
+        ),
+        'fineweb.kd_qwen25coder_0p5b_warmstart': make_flexllama_warmstart_kd(
+            "qwen2.5coder-0.5b",
+            kd_lambda=0.5, kd_temperature=2.0, epochs=10, patience=3,
+            wandb_project_name="FlexLLaMA_fineweb_kd_qwen25coder_0p5b_warmstart",
+        ),
+        'fineweb.kd_qwen25coder_1p5b_warmstart': make_flexllama_warmstart_kd(
+            "qwen2.5coder-1.5b",
+            kd_lambda=0.5, kd_temperature=2.0, epochs=10, patience=3,
+            batch_size=2,  # same 1.5B-class memory profile as kd_qwen25_1p5b_warmstart above
+            wandb_project_name="FlexLLaMA_fineweb_kd_qwen25coder_1p5b_warmstart",
+        ),
+        # "Bigger teacher" combos: student is warm-started from its own (smaller)
+        # checkpoint via `teacher`, but KD-distilled against a separate, larger
+        # TEACHER_PRESETS entry via kd_teacher - both must share a tokenizer/vocab
+        # (enforced in make_flexllama_warmstart_kd) so student/teacher logits line
+        # up index-for-index.
+        'fineweb.kd_qwen25coder_0p5b_warmstart_bigteacher': make_flexllama_warmstart_kd(
+            "qwen2.5coder-0.5b", kd_teacher="qwen2.5coder-1.5b",
+            kd_lambda=0.5, kd_temperature=2.0, epochs=10, patience=3,
+            wandb_project_name="FlexLLaMA_fineweb_kd_qwen25coder_0p5b_warmstart_bigteacher",
+        ),
+        'fineweb.kd_tinyllama_warmstart_bigteacher': make_flexllama_warmstart_kd(
+            "tinyllama-1.1b", kd_teacher="llama2-7b",
+            kd_lambda=0.5, kd_temperature=2.0, epochs=10, patience=3,
+            wandb_project_name="FlexLLaMA_fineweb_kd_tinyllama_warmstart_bigteacher",
         ),
         # Memory-optimized variants: identical algorithm and gradients to the configs
         # above (see training_memopt.py), just lower peak memory - which is what lets
