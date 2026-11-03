@@ -577,6 +577,10 @@ def finetune(model: pl.LightningModule, config: TrainingContext, conf_descriptio
         steps_per_epoch = getattr(train_loader, 'estimated_steps_per_epoch', None)
         steps_are_exact = False
     val_check_interval = max(1, steps_per_epoch // 20) if steps_per_epoch else 1.0
+    if steps_per_epoch and not steps_are_exact:
+        # Streaming loaders only estimate their length, so DDP ranks can run out
+        # of batches at different steps; cap every rank to the same step count.
+        kwargs['limit_train_batches'] = max(1, int(steps_per_epoch * 0.9))
 
     _print_experiment_banner(conf_description, model_config, config, steps_per_epoch, steps_are_exact)
 
@@ -588,10 +592,11 @@ def finetune(model: pl.LightningModule, config: TrainingContext, conf_descriptio
         # loading code, which all expect that format.
         strategy = FSDPStrategy(process_group_backend='nccl')
     else:
-        strategy = DDPStrategy(process_group_backend='nccl', find_unused_parameters=True)
+        strategy = DDPStrategy(process_group_backend='nccl', find_unused_parameters=True, timeout=datetime.timedelta(minutes=60))
     trainer = pl.Trainer(
         **kwargs,
         max_epochs=config.epochs,
+        num_sanity_val_steps=0,
         callbacks=callbacks,
         log_every_n_steps=10,
         val_check_interval=val_check_interval,
@@ -604,7 +609,7 @@ def finetune(model: pl.LightningModule, config: TrainingContext, conf_descriptio
     )
 
     try:
-        trainer.fit(model, train_loader, val_loader, ckpt_path=resume_from)
+        trainer.fit(model, train_loader, val_loader, ckpt_path=resume_from, weights_only=False)
     except Exception as exc:
         # Training may have fully completed before a post-epoch callback (e.g.
         # scheduler step) raised.  Try to recover and permanently save the best
@@ -614,7 +619,7 @@ def finetune(model: pl.LightningModule, config: TrainingContext, conf_descriptio
             logging.warning(
                 f"trainer.fit() raised {exc!r}. Attempting recovery from {best_path}")
             try:
-                recovered = type(model).load_from_checkpoint(best_path)
+                recovered = type(model).load_from_checkpoint(best_path, weights_only=False, map_location="cpu")
                 utils.save_model(conf_description, recovered.submodel)
                 logging.warning("Recovery succeeded. Weights saved to permanent storage.")
             except Exception as rec_exc:
@@ -626,11 +631,11 @@ def finetune(model: pl.LightningModule, config: TrainingContext, conf_descriptio
     if utils.get_num_nodes() > 1:
         if trainer.is_global_zero:
             model = type(model).load_from_checkpoint(
-                checkpoint_callback.best_model_path)
+                checkpoint_callback.best_model_path, weights_only=False, map_location="cpu")
             utils.save_model(conf_description, model.submodel)
     else:
         model = type(model).load_from_checkpoint(
-            checkpoint_callback.best_model_path)
+            checkpoint_callback.best_model_path, weights_only=False, map_location="cpu")
         utils.save_model(conf_description, model.submodel)
 
     # Testing is informational, a failure here must not erase already-saved weights.

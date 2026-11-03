@@ -1,0 +1,12 @@
+# Multiple-choice (letter) formulation of the same medical benchmarks as
+# medcloze: the model sees the options with letters A-D and scores the letter.
+group: medmcf
+task:
+  - medqa_4options
+  - medmcqa
+  - mmlu_anatomy
+  - mmlu_clinical_knowledge
+  - mmlu_college_medicine
+  - mmlu_medical_genetics
+  - mmlu_professional_medicine
+  - mmlu_virology

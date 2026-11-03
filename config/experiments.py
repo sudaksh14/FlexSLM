@@ -242,6 +242,14 @@ TEACHER_PRESETS = {
         rope_theta=1000000.0, rms_norm_eps=1e-6, tie_embeddings=True, qkv_bias=True,
         dims_spec=dict(hidden=1536, heads=12, kv_heads=2, intermediate=8960),
     ),
+    # FaithMed's backbone: the post-trained (thinking) Qwen3-1.7B, not -Base.
+    # Qwen3 drops the q/k/v bias and adds per-head q/k RMSNorm (qk_norm).
+    "qwen3-1.7b": dict(
+        hf_model="Qwen/Qwen3-1.7B", vocab_size=151936, num_layers=28,
+        rope_theta=1000000.0, rms_norm_eps=1e-6, tie_embeddings=True, qkv_bias=False,
+        qk_norm=True,
+        dims_spec=dict(hidden=2048, heads=16, kv_heads=8, intermediate=6144),
+    ),
 }
 
 _WARMSTART_FIELDS = ("num_layers", "dims_spec", "rope_theta", "rms_norm_eps",
@@ -379,6 +387,7 @@ def make_flexllama_warmstart_kd(teacher: str, n_levels: int = 3, min_frac: float
             rms_norm_eps=preset["rms_norm_eps"],
             tie_embeddings=preset["tie_embeddings"],
             qkv_bias=preset["qkv_bias"],
+            qk_norm=preset.get("qk_norm", False),
             pretrained_hf_model=preset["hf_model"],
         ),
         LLaMAKDTrainingContext(
@@ -910,3 +919,61 @@ CONFIGS = {
         ),
     }
 }
+
+
+def _make_web_corpus_kd(loader_fn, wandb_name, max_tokens=1_400_000_000, map_workers=1,
+                         model_config=None, teacher_hf_model="JackFram/llama-160m",
+                         tokenizer_name="JackFram/llama-160m"):
+    if model_config is None:
+        model_config = FlexLLaMAConfig(pretrained_hf_model=teacher_hf_model)
+    ctx = LLaMAKDTrainingContext(
+        kd_lambda=0.5, kd_temperature=2.0,
+        teacher_hf_model=teacher_hf_model,
+        tokenizer_name=tokenizer_name,
+        dataset="fineweb-edu",  # placeholder just to satisfy the constructor; overwritten below
+        epochs=3, patience=3,
+        wandb_project_name=wandb_name,
+    )
+    ctx.loader_function = partial(
+        loader_fn,
+        max_seq_length=1024, batch_size=8,
+        max_tokens=max_tokens,
+        tokenizer_name=tokenizer_name,
+    )
+    return TrainerBuilder(
+        FlexLMKDTrainer,
+        model_config,
+        ctx,
+    )
+
+CONFIGS['flexllama']['refinedweb.kd_lambda05_1p4B'] = _make_web_corpus_kd(
+    utils.load_refinedweb, "FlexLLaMA_refinedweb_kd_lambda05_1p4B")
+
+CONFIGS['flexllama']['gneissweb.kd_lambda05_1p4B'] = _make_web_corpus_kd(
+    utils.load_gneissweb, "FlexLLaMA_gneissweb_kd_lambda05_1p4B")
+
+CONFIGS['flexllama']['pmc.kd_lambda05_3B'] = _make_web_corpus_kd(
+    utils.load_pmc_open_access, "FlexLLaMA_pmc_kd_lambda05_3B", max_tokens=3_000_000_000)
+
+CONFIGS['flexgpt']['refinedweb.kd_lambda05_1p4B'] = _make_web_corpus_kd(
+    utils.load_refinedweb, "FlexGPT_refinedweb_kd_lambda05_1p4B",
+    model_config=FlexGPTConfig(pretrained_hf_model="gpt2"),
+    teacher_hf_model="gpt2", tokenizer_name="gpt2")
+
+CONFIGS['flexgpt']['gneissweb.kd_lambda05_1p4B'] = _make_web_corpus_kd(
+    utils.load_gneissweb, "FlexGPT_gneissweb_kd_lambda05_1p4B",
+    model_config=FlexGPTConfig(pretrained_hf_model="gpt2"),
+    teacher_hf_model="gpt2", tokenizer_name="gpt2")
+
+CONFIGS['flexllama']['pmc.full3ep'] = _make_web_corpus_kd(
+    utils.load_pmc_open_access, "FlexLLaMA_pmc_full3ep", max_tokens=3_000_000_000)
+CONFIGS['flexllama']['pmc.full3ep'].training_context.patience = 1000  # run all epochs, no early stop
+
+CONFIGS['flexllama']['pmc.full5ep'] = _make_web_corpus_kd(
+    utils.load_pmc_open_access, "FlexLLaMA_pmc_full5ep", max_tokens=3_000_000_000)
+CONFIGS['flexllama']['pmc.full5ep'].training_context.patience = 1000  # run all epochs, no early stop
+CONFIGS['flexllama']['pmc.full5ep'].training_context.epochs = 5
+
+
+from sft import register_sft_configs
+register_sft_configs(CONFIGS)

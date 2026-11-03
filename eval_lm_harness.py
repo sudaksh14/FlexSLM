@@ -9,6 +9,7 @@ from transformers import GPT2TokenizerFast, AutoTokenizer
 from lm_eval.api.model import LM
 from lm_eval.api.registry import register_model
 from lm_eval import evaluator
+from lm_eval.tasks import TaskManager
 from lm_eval.utils import make_table
 
 
@@ -150,6 +151,10 @@ if __name__ == "__main__":
     parser.add_argument("--output", default="results/flexgpt_eval.json")
     parser.add_argument("--tokenizer", default=None,
                         help="override the auto-detected tokenizer (KD teacher / warm-start source / gpt2 or llama-160m)")
+    parser.add_argument("--include_path", default=None,
+                        help="extra directory with task YAMLs (e.g. medcloze)")
+    parser.add_argument("--samples", default=None,
+                        help="also write per-question predictions to this file")
     args = parser.parse_args()
 
     builder = resolve_from_str(args.config)
@@ -171,20 +176,47 @@ if __name__ == "__main__":
         )
     print(f"Loading model: {args.config}  (tokenizer={tokenizer_name})")
 
+    task_manager = TaskManager(include_path=args.include_path) if args.include_path else None
+
     all_results = {}
+    all_samples = {}
     for level in range(model.max_level() + 1):
         lm = EvalClass(model, level=level, device=args.device, tokenizer_name=tokenizer_name)
         results = evaluator.simple_evaluate(
             model=lm,
             tasks=args.tasks.split(","),
             batch_size=args.batch_size,
-            log_samples=False,
+            log_samples=args.samples is not None,
+            task_manager=task_manager,
         )
         all_results[f"level_{level}"] = results["results"]
         print(f"\n=== Level {level} ===")
         print(make_table(results))
 
+        if args.samples:
+            # Keep only what is needed to check the answer distribution per task.
+            level_samples = {}
+            for task, samples in results["samples"].items():
+                rows = []
+                for s in samples:
+                    if not isinstance(s["target"], int):
+                        continue
+                    lls = [r[0] for r in s["filtered_resps"]]
+                    rows.append({"doc_id": s["doc_id"], "target": s["target"],
+                                 "pred": lls.index(max(lls))})
+                counts = [0] * max((len(s["filtered_resps"]) for s in samples), default=0)
+                for r in rows:
+                    counts[r["pred"]] += 1
+                print(f"  {task}: predicted option counts {counts}")
+                level_samples[task] = {"pred_counts": counts, "rows": rows}
+            all_samples[f"level_{level}"] = level_samples
+
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
     with open(args.output, "w") as f:
         json.dump(all_results, f, indent=2)
     print(f"\nResults saved to {args.output}")
+
+    if args.samples:
+        with open(args.samples, "w") as f:
+            json.dump(all_samples, f)
+        print(f"Per-question predictions saved to {args.samples}")

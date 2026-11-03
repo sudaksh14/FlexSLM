@@ -1,5 +1,5 @@
 #!/usr/bin/bash
-LOCAL_CACHE=/local_scratch/$USER/$SLURM_JOB_ID
+LOCAL_CACHE=/scratch-local/$USER/$SLURM_JOB_ID
 mkdir -p "$LOCAL_CACHE"
 trap 'rm -rf "$LOCAL_CACHE"' EXIT
 

@@ -23,6 +23,7 @@ class FlexLLaMAConfig(FlexModelConfig):
     rms_norm_eps: float = 1e-6
     tie_embeddings: bool = False
     qkv_bias: bool = False  # True for Qwen2-family checkpoints; LLaMA family has no attention bias
+    qk_norm: bool = False   # True for Qwen3-family checkpoints: per-head RMSNorm on q and k
     pretrained_hf_model: Optional[str] = None
 
     def make_model(self) -> 'FlexLLaMA':
@@ -69,6 +70,7 @@ class LLaMADecoderBlock(nn.Module):
         max_seq_len: int,
         num_kv_heads: Iterable[int] = None,
         qkv_bias: bool = False,
+        qk_norm: bool = False,
     ):
         super().__init__()
         self.input_layernorm          = fm.RMSNorm(hidden_dims, eps=rms_norm_eps)
@@ -76,7 +78,9 @@ class LLaMADecoderBlock(nn.Module):
                                                          num_kv_heads=num_kv_heads,
                                                          rope_theta=rope_theta,
                                                          max_seq_len=max_seq_len,
-                                                         qkv_bias=qkv_bias)
+                                                         qkv_bias=qkv_bias,
+                                                         qk_norm=qk_norm,
+                                                         rms_norm_eps=rms_norm_eps)
         self.post_attention_layernorm = fm.RMSNorm(hidden_dims, eps=rms_norm_eps)
         self.mlp                      = LLaMAMLPBlock(hidden_dims, intermediate_dims)
 
@@ -110,6 +114,7 @@ class FlexLLaMA(FlexModel):
                 hidden_dims, num_heads, intermediate_dims,
                 config.rope_theta, config.rms_norm_eps, config.max_seq_length,
                 num_kv_heads=num_kv_heads, qkv_bias=config.qkv_bias,
+                qk_norm=getattr(config, "qk_norm", False),
             ) for i in range(config.num_layers)}
         ))
 

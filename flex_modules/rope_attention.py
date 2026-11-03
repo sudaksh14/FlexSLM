@@ -9,6 +9,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from flex_modules.linear import Linear
+from flex_modules.rmsnorm import _RMSNormBase
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -48,6 +49,8 @@ class RoPEAttention(nn.Module):
         rope_theta: float = 10000.0,
         max_seq_len: int = 1024,
         qkv_bias: bool = False,
+        qk_norm: bool = False,
+        rms_norm_eps: float = 1e-6,
     ):
         super().__init__()
         hidden_dims = list(hidden_dims)
@@ -70,6 +73,15 @@ class RoPEAttention(nn.Module):
         self.k_proj = Linear(hidden_dims, kv_dims, bias=qkv_bias)
         self.v_proj = Linear(hidden_dims, kv_dims, bias=qkv_bias)
         self.o_proj = Linear(hidden_dims, hidden_dims, bias=False)
+
+        # Qwen3 convention: per-head RMSNorm on q and k before RoPE. The weights
+        # have size head_dim, so they are shared by every level as long as all
+        # levels keep the same head_dim (which _flex_llama_dims guarantees).
+        self.qk_norm = qk_norm
+        if qk_norm:
+            assert len(set(head_dims)) == 1, "qk_norm needs the same head_dim on every level"
+            self.q_norm = _RMSNormBase(head_dims[0], eps=rms_norm_eps)
+            self.k_norm = _RMSNormBase(head_dims[0], eps=rms_norm_eps)
 
         # Precompute RoPE cos/sin per level.
         for level in range(len(hidden_dims)):
@@ -95,6 +107,9 @@ class RoPEAttention(nn.Module):
         q = self.q_proj(x).view(B, S, num_heads, head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, S, num_kv_heads, head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, S, num_kv_heads, head_dim).transpose(1, 2)
+        if self.qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
         cos = getattr(self, f'cos_{level}')[:S]   # [S, head_dim]
         sin = getattr(self, f'sin_{level}')[:S]   # [S, head_dim]

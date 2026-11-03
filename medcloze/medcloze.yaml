@@ -1,0 +1,10 @@
+group: medcloze
+task:
+  - medqa_cloze
+  - medmcqa_cloze
+  - mmlu_anatomy_continuation
+  - mmlu_clinical_knowledge_continuation
+  - mmlu_college_medicine_continuation
+  - mmlu_medical_genetics_continuation
+  - mmlu_professional_medicine_continuation
+  - mmlu_virology_continuation

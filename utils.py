@@ -784,15 +784,16 @@ def load_llama_weights_into_flexllama(
     (self_attn.{q,k,v,o}_proj, mlp.{gate,up,down}_proj, input/post_attention_layernorm,
     model.norm, model.embed_tokens, lm_head) that the same key layout works for both;
     the only structural difference handled here is Qwen2's biased q/k/v projections
-    (cfg.qkv_bias).
+    (cfg.qkv_bias). Qwen3 uses the same naming without the bias and adds per-head
+    q_norm/k_norm RMSNorm weights (cfg.qk_norm).
     """
     from transformers import AutoConfig, AutoModelForCausalLM
     from flex_modules.rmsnorm import _RMSNormBase
 
     hf_config = AutoConfig.from_pretrained(hf_model_name, cache_dir=cache_dir)
-    if hf_config.model_type not in ("llama", "qwen2"):
+    if hf_config.model_type not in ("llama", "qwen2", "qwen3"):
         raise ValueError(
-            f"load_llama_weights_into_flexllama only supports llama/qwen2 "
+            f"load_llama_weights_into_flexllama only supports llama/qwen2/qwen3 "
             f"checkpoints (identical module naming); got model_type={hf_config.model_type!r} "
             f"for {hf_model_name}"
         )
@@ -804,6 +805,18 @@ def load_llama_weights_into_flexllama(
     max_num_kv_heads = list(cfg.num_kv_heads)[-1]
     head_dim         = max_hidden // max_num_heads
     max_kv_dim       = max_num_kv_heads * head_dim
+
+    hf_head_dim = getattr(hf_config, "head_dim", None) or hf_config.hidden_size // hf_config.num_attention_heads
+    if hf_head_dim != head_dim:
+        raise ValueError(
+            f"head_dim mismatch: checkpoint={hf_head_dim}, model max level={head_dim} "
+            f"(hidden // heads). RoPEAttention assumes num_heads * head_dim == hidden."
+        )
+    if (hf_config.model_type == "qwen3") != bool(getattr(cfg, "qk_norm", False)):
+        raise ValueError(
+            f"qk_norm={getattr(cfg, 'qk_norm', False)} does not match model_type="
+            f"{hf_config.model_type!r}: Qwen3 checkpoints need qk_norm=True, others False."
+        )
 
     hf = AutoModelForCausalLM.from_pretrained(hf_model_name, cache_dir=cache_dir)
     sd = hf.state_dict()
@@ -864,6 +877,11 @@ def load_llama_weights_into_flexllama(
                 tmp_linear.bias.data.copy_(sd[f"{pfx}.self_attn.{proj}.bias"])
             getattr(block.self_attn, proj).load_from_base(tmp_linear)
 
+        # Qwen3 per-head q/k RMSNorm, shared by every level (same head_dim).
+        if getattr(cfg, "qk_norm", False):
+            block.self_attn.q_norm.weight.data.copy_(sd[f"{pfx}.self_attn.q_norm.weight"])
+            block.self_attn.k_norm.weight.data.copy_(sd[f"{pfx}.self_attn.k_norm.weight"])
+
         # Post-attention RMSNorm
         tmp_rms2 = _RMSNormBase(max_hidden, eps=cfg.rms_norm_eps)
         tmp_rms2.weight.data.copy_(sd[f"{pfx}.post_attention_layernorm.weight"])
@@ -892,3 +910,332 @@ def load_llama_weights_into_flexllama(
         tmp_lm_head = nn.Linear(max_hidden, cfg.vocab_size, bias=False)
         tmp_lm_head.weight.data.copy_(sd["lm_head.weight"])
         model.lm_head.load_from_base(tmp_lm_head)
+
+
+# RefinedWeb and GneissWeb
+def _load_streaming_web_corpus(
+    hf_dataset_id: str,
+    text_field: str,
+    max_seq_length: int = 1024,
+    batch_size: int = 8,
+    cache_dir: str = None,
+    max_examples: int = 150_000,
+    max_tokens: int = None,
+    val_size: int = 2000,
+    test_size: int = 2000,
+    tokenizer_name: str = "JackFram/llama-160m",
+    avg_tokens_per_doc: int = 1000,
+    hf_config_name: str = None,
+) -> tuple[DataLoader, DataLoader, DataLoader]:
+    """
+    Generic streaming pipeline for a single-column-text web corpus on the HF
+    Hub. Identical mechanics to load_fineweb_edu: DDP-shards the raw stream
+    across ranks first (each rank tokenizes only its own disjoint slice),
+    reserves a fixed-position held-out prefix for val/test, buffered-shuffles
+    the train portion, then tokenizes+packs lazily so memory stays bounded
+    regardless of how large max_tokens/max_examples is.
+
+    text_field is the one thing that differs between corpora (FineWeb-Edu:
+    "text", Falcon RefinedWeb: "content", ...) - callers below pin this down
+    per-dataset so this function stays dataset-agnostic.
+    """
+    from datasets import load_dataset
+    from datasets.distributed import split_dataset_by_node
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, cache_dir=cache_dir)
+
+    rank = int(os.environ.get('SLURM_PROCID', 0))
+    world_size = int(os.environ.get('SLURM_NTASKS', 1))
+
+    raw_stream = load_dataset(
+        hf_dataset_id,
+        name=hf_config_name,
+        split="train",
+        streaming=True,
+        cache_dir=cache_dir,
+    )
+    if world_size > 1:
+        raw_stream = split_dataset_by_node(raw_stream, rank=rank, world_size=world_size)
+        rank_max_examples = max_examples // world_size
+        rank_max_tokens = max_tokens // world_size if max_tokens is not None else None
+    else:
+        rank_max_examples = max_examples
+        rank_max_tokens = max_tokens
+
+    rank_max_docs = (
+        -(-rank_max_tokens // avg_tokens_per_doc)  # ceil division
+        if rank_max_tokens is not None else rank_max_examples
+    )
+
+    val_stream   = raw_stream.take(val_size)
+    test_stream  = raw_stream.skip(val_size).take(test_size)
+    train_stream = raw_stream.skip(val_size + test_size).take(rank_max_docs)
+    train_stream = train_stream.shuffle(seed=42, buffer_size=10_000)
+
+    def tokenize(examples):
+        return tokenizer(examples[text_field], add_special_tokens=False)
+
+    def pack(examples):
+        ids = sum(examples["input_ids"], [])
+        total = (len(ids) // max_seq_length) * max_seq_length
+        chunks = [ids[i: i + max_seq_length] for i in range(0, total, max_seq_length)]
+        return {"input_ids": chunks}
+
+    def collate(batch):
+        ids = torch.stack([torch.as_tensor(b["input_ids"], dtype=torch.long) for b in batch])
+        return ids, ids
+
+    def make_loader(stream) -> DataLoader:
+        ds = stream.map(tokenize, batched=True, remove_columns=stream.column_names)
+        ds = ds.map(pack, batched=True, remove_columns=["attention_mask"])
+        return DataLoader(ds, batch_size=batch_size, num_workers=0, collate_fn=collate)
+
+    train_loader = make_loader(train_stream)
+    train_loader.estimated_steps_per_epoch = max(
+        1, (rank_max_docs * avg_tokens_per_doc // max_seq_length) // batch_size)
+
+    return train_loader, make_loader(val_stream), make_loader(test_stream)
+
+
+def load_refinedweb(
+    max_seq_length: int = 1024,
+    batch_size: int = 8,
+    cache_dir: str = None,
+    max_examples: int = 150_000,
+    max_tokens: int = None,
+    val_size: int = 2000,
+    test_size: int = 2000,
+    tokenizer_name: str = "JackFram/llama-160m",
+    **_ignored,
+) -> tuple[DataLoader, DataLoader, DataLoader]:
+    """
+    Streams Falcon RefinedWeb (tiiuae/falcon-refinedweb). Same pipeline as
+    load_fineweb_edu; the text column is named "content" instead of "text".
+    """
+    return _load_streaming_web_corpus(
+        "tiiuae/falcon-refinedweb", text_field="content",
+        max_seq_length=max_seq_length, batch_size=batch_size, cache_dir=cache_dir,
+        max_examples=max_examples, max_tokens=max_tokens,
+        val_size=val_size, test_size=test_size, tokenizer_name=tokenizer_name,
+    )
+
+
+def load_gneissweb(
+    max_seq_length: int = 1024,
+    batch_size: int = 8,
+    cache_dir: str = None,
+    max_examples: int = 2_000_000,
+    max_tokens: int = None,
+    val_size: int = 2000,
+    test_size: int = 2000,
+    tokenizer_name: str = "JackFram/llama-160m",
+    **_ignored,
+) -> tuple[DataLoader, DataLoader, DataLoader]:
+    """
+    Reconstructs GneissWeb (ibm-granite/GneissWeb) from FineWeb
+    (HuggingFaceFW/fineweb). The GneissWeb repo ships no text, only a bloom
+    filter over FineWeb document ids (ibm-granite/GneissWeb.bloom, ~28GB); a
+    document belongs to GneissWeb if its `id` is in the filter. The exact
+    substring deduplication step of the original pipeline is not reproduced.
+
+    About half of FineWeb passes the filter, so the train split counts packed
+    tokens and stops at exactly max_tokens per rank instead of taking an
+    estimated number of documents. This keeps all DDP ranks at the same number
+    of steps. max_examples counts matched documents.
+    """
+    from hashlib import sha256
+    from pickle import dumps
+    from datasets import load_dataset
+    from datasets.distributed import split_dataset_by_node
+    from transformers import AutoTokenizer
+    from rbloom import Bloom
+    from huggingface_hub import hf_hub_download
+
+    def _gneissweb_hash_func(obj):
+        h = sha256(dumps(obj)).digest()
+        return int.from_bytes(h[:16], "big", signed=True)
+
+    bloom_path = hf_hub_download(
+        repo_id="ibm-granite/GneissWeb.bloom", filename="gneissweb.bloom",
+        repo_type="model", cache_dir=cache_dir,
+    )
+    bf = Bloom.load(bloom_path, _gneissweb_hash_func)
+
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, cache_dir=cache_dir)
+
+    rank = int(os.environ.get('SLURM_PROCID', 0))
+    world_size = int(os.environ.get('SLURM_NTASKS', 1))
+
+    raw_stream = load_dataset(
+        "HuggingFaceFW/fineweb", split="train", streaming=True, cache_dir=cache_dir,
+    )
+    if world_size > 1:
+        raw_stream = split_dataset_by_node(raw_stream, rank=rank, world_size=world_size)
+        rank_max_tokens = max_tokens // world_size if max_tokens is not None else None
+        rank_max_examples = max_examples // world_size
+    else:
+        rank_max_tokens = max_tokens
+        rank_max_examples = max_examples
+
+    gneiss_stream = raw_stream.filter(lambda row: row["id"] in bf)
+
+    val_stream   = gneiss_stream.take(val_size)
+    test_stream  = gneiss_stream.skip(val_size).take(test_size)
+    train_stream = gneiss_stream.skip(val_size + test_size).shuffle(seed=42, buffer_size=10_000)
+
+    def tokenize(examples):
+        return tokenizer(examples["text"], add_special_tokens=False)
+
+    def pack(examples):
+        ids = sum(examples["input_ids"], [])
+        total = (len(ids) // max_seq_length) * max_seq_length
+        chunks = [ids[i: i + max_seq_length] for i in range(0, total, max_seq_length)]
+        return {"input_ids": chunks}
+
+    def collate(batch):
+        ids = torch.stack([torch.as_tensor(b["input_ids"], dtype=torch.long) for b in batch])
+        return ids, ids
+
+    def make_fixed_loader(stream) -> DataLoader:
+        ds = stream.map(tokenize, batched=True, remove_columns=stream.column_names)
+        ds = ds.map(pack, batched=True, remove_columns=["attention_mask"])
+        return DataLoader(ds, batch_size=batch_size, num_workers=0, collate_fn=collate)
+
+    def train_chunk_generator():
+        buffer, yielded_tokens, docs_seen = [], 0, 0
+        token_limit = rank_max_tokens if rank_max_tokens is not None else float("inf")
+        for row in train_stream:
+            if yielded_tokens >= token_limit or docs_seen >= rank_max_examples:
+                break
+            docs_seen += 1
+            buffer.extend(tokenizer(row["text"], add_special_tokens=False)["input_ids"])
+            while len(buffer) >= max_seq_length and yielded_tokens < token_limit:
+                chunk, buffer = buffer[:max_seq_length], buffer[max_seq_length:]
+                yielded_tokens += max_seq_length
+                yield {"input_ids": chunk}
+
+    class _GneissWebTrainDataset(torch.utils.data.IterableDataset):
+        def __iter__(self):
+            return train_chunk_generator()
+
+    train_loader = DataLoader(_GneissWebTrainDataset(), batch_size=batch_size, num_workers=0, collate_fn=collate)
+    if rank_max_tokens is not None:
+        train_loader.estimated_steps_per_epoch = max(1, (rank_max_tokens // max_seq_length) // batch_size)
+
+    return train_loader, make_fixed_loader(val_stream), make_fixed_loader(test_stream)
+
+
+def load_pmc_open_access(
+    max_seq_length: int = 1024,
+    batch_size: int = 8,
+    cache_dir: str = None,
+    max_examples: int = 2_000_000,
+    max_tokens: int = None,
+    val_tokens: int = 2_000_000,
+    test_tokens: int = 2_000_000,
+    tokenizer_name: str = "JackFram/llama-160m",
+    ids_file: str = None,
+    **_ignored,
+) -> tuple[DataLoader, DataLoader, DataLoader]:
+    """
+    Streams PMC Open Access (Commercial-Use-Allowed subset) full-text
+    articles, fetched directly from the public S3 bucket
+    (s3://pmc-oa-opendata, no AWS credentials needed - plain HTTPS GET) by
+    PMCID. The HF `pmc/open_access` dataset's own loading script relies on
+    NCBI's legacy oa_bulk FTP tarballs, which NCBI decommissioned in August
+    2026 - this loader talks to the current S3-based service directly
+    instead, using a pre-fetched ID list (fetch_pmc_commercial_ids.py)
+    since NCBI's esearch API caps any single query's retrievable results at
+    9,999 records.
+
+    Matches BioMistral's own published PMC-OA training recipe (arxiv
+    2402.10373): the Commercial-Use-Allowed license subset (CC0/CC-BY/
+    CC-BY-SA/CC-BY-ND), ~3B tokens, ~98.75% English.
+
+    Val and test also stop at a fixed token count per rank, so every rank
+    yields the same number of batches.
+    """
+    import random
+    import urllib.request
+    import concurrent.futures
+    import itertools
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, cache_dir=cache_dir)
+
+    ids_path = ids_file or os.path.join(os.path.dirname(os.path.abspath(__file__)), "pmc_commercial_ids.txt")
+    with open(ids_path) as f:
+        all_ids = [line.strip() for line in f if line.strip()]
+
+    rng = random.Random(42)
+    rng.shuffle(all_ids)
+
+    rank = int(os.environ.get('SLURM_PROCID', 0))
+    world_size = int(os.environ.get('SLURM_NTASKS', 1))
+
+    my_ids = all_ids[rank::world_size] if world_size > 1 else all_ids
+    val_ids = my_ids[:2000]
+    test_ids = my_ids[2000:4000]
+    train_ids = my_ids[4000:]
+
+    rank_max_tokens = (max_tokens // world_size if max_tokens is not None else None) if world_size > 1 else max_tokens
+    rank_max_examples = (max_examples // world_size) if world_size > 1 else max_examples
+
+    def fetch_text(pmcid):
+        url = f"https://pmc-oa-opendata.s3.amazonaws.com/{pmcid}.1/{pmcid}.1.txt"
+        try:
+            with urllib.request.urlopen(url, timeout=8) as resp:
+                return resp.read().decode("utf-8", errors="ignore")
+        except Exception:
+            return None
+
+    def collate(batch):
+        ids = torch.stack([torch.as_tensor(b["input_ids"], dtype=torch.long) for b in batch])
+        return ids, ids
+
+    def chunk_generator(id_list, token_limit, example_limit):
+        buffer, yielded_tokens, docs_seen = [], 0, 0
+        limit = token_limit if token_limit is not None else float("inf")
+        max_workers = 32
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            it = iter(id_list)
+            pending = set()
+            for pmcid in itertools.islice(it, max_workers):
+                pending.add(pool.submit(fetch_text, pmcid))
+            while pending:
+                done, pending = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
+                for fut in done:
+                    text = fut.result()
+                    next_id = next(it, None)
+                    if next_id is not None:
+                        pending.add(pool.submit(fetch_text, next_id))
+                    if yielded_tokens >= limit or docs_seen >= example_limit:
+                        continue
+                    if not text:
+                        continue
+                    docs_seen += 1
+                    buffer.extend(tokenizer(text, add_special_tokens=False)["input_ids"])
+                    while len(buffer) >= max_seq_length and yielded_tokens < limit:
+                        chunk, buffer = buffer[:max_seq_length], buffer[max_seq_length:]
+                        yielded_tokens += max_seq_length
+                        yield {"input_ids": chunk}
+                if yielded_tokens >= limit or docs_seen >= example_limit:
+                    for fut in pending:
+                        fut.cancel()
+                    break
+
+    def make_loader(id_list, token_limit, example_limit):
+        class _PMCDataset(torch.utils.data.IterableDataset):
+            def __iter__(self):
+                return chunk_generator(id_list, token_limit, example_limit)
+        return DataLoader(_PMCDataset(), batch_size=batch_size, num_workers=0, collate_fn=collate)
+
+    train_loader = make_loader(train_ids, rank_max_tokens, rank_max_examples)
+    if rank_max_tokens is not None:
+        train_loader.estimated_steps_per_epoch = max(1, (rank_max_tokens // max_seq_length) // batch_size)
+
+    val_loader = make_loader(val_ids, val_tokens, len(val_ids))
+    test_loader = make_loader(test_ids, test_tokens, len(test_ids))
+
+    return train_loader, val_loader, test_loader

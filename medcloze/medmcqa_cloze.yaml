@@ -1,0 +1,15 @@
+# Cloze version of medmcqa: score the answer text, not the letter.
+task: medmcqa_cloze
+dataset_path: openlifescienceai/medmcqa
+output_type: multiple_choice
+test_split: validation
+doc_to_text: "Question: {{question}}\nAnswer:"
+doc_to_choice: "{{[opa, opb, opc, opd]}}"
+doc_to_target: cop
+metric_list:
+  - metric: acc
+    aggregation: mean
+    higher_is_better: true
+  - metric: acc_norm
+    aggregation: mean
+    higher_is_better: true

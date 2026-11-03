@@ -1,6 +1,6 @@
 #!/usr/bin/bash
 #SBATCH --job-name=eval_job
-#SBATCH --partition=performance
+#SBATCH --partition=gpu_h100
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
 #SBATCH --ntasks-per-node=1
@@ -27,10 +27,16 @@
 #
 # Usage:
 #   sbatch eval_job.sh wiki <config> [dataset] [batch_size]
-#   sbatch eval_job.sh lm   <config> [tasks] [batch_size]
+#   sbatch eval_job.sh lm   <config> [tasks] [batch_size] [tag]
 #
 #   sbatch eval_job.sh wiki flexllama,fineweb.kd_lambda05_1p4B
 #   sbatch eval_job.sh lm   flexllama,fineweb.kd_lambda05_1p4B lambada_openai,hellaswag 4
+#   sbatch eval_job.sh lm   flexllama,pmc.full3ep medcloze 8 medcloze
+#
+# The optional tag goes into the output name (results/<config>.<tag>.json) so a
+# second task set does not overwrite earlier results for the same checkpoint.
+# Per-question predictions are written next to it as <...>.samples.json.
+# Custom task YAMLs (cloze-format medical QA) live in ./medcloze.
 
 MODE=${1:?"usage: sbatch eval_job.sh <wiki|lm> <config> [...]"}
 CONFIG=${2:?"usage: sbatch eval_job.sh <wiki|lm> <config> [...]"}
@@ -50,10 +56,13 @@ case "$MODE" in
   lm)
     TASKS=${3:-"wikitext,lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,openbookqa,triviaqa"}
     BATCH_SIZE=${4:-8}
+    TAG=${5:-}
     SAFE_NAME=$(echo "$CONFIG" | tr ',/' '__')
-    OUT="results/${SAFE_NAME}.json"
+    OUT="results/${SAFE_NAME}${TAG:+.$TAG}.json"
+    SAMPLES="results/${SAFE_NAME}${TAG:+.$TAG}.samples.json"
     echo "[eval_job:lm] config=$CONFIG tasks=$TASKS batch_size=$BATCH_SIZE output=$OUT"
-    python3 eval_lm_harness.py --config "$CONFIG" --tasks "$TASKS" --batch_size "$BATCH_SIZE" --output "$OUT"
+    python3 eval_lm_harness.py --config "$CONFIG" --tasks "$TASKS" --batch_size "$BATCH_SIZE" \
+        --output "$OUT" --samples "$SAMPLES" --include_path medcloze
     ;;
   *)
     echo "ERROR: unknown mode '$MODE' - expected 'wiki' or 'lm'" >&2
