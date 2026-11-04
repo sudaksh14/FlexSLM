@@ -82,6 +82,14 @@ class FlexTrainingContext(TrainingContext):
 
     distill: bool = False
 
+    # In-place distillation between levels (SHARD-style), FlexLMTrainer only.
+    # 'none': CE per level. 'progressive': each level distills from the next
+    # wider level trained this step. 'US': every narrower level distills from
+    # the widest. The widest level always trains on CE alone.
+    inplace_kd: str = 'none'
+    inplace_kd_temperature: float = 1.0
+    inplace_kd_ce_coefficient: float = 1.0
+
 
 class FlexModelTrainer(pl.LightningModule, BaseTrainer):
     def __init__(self, model_config: ModelConfig, training_context: FlexTrainingContext) -> None:
@@ -233,6 +241,20 @@ class FlexLMTrainer(FlexModelTrainer):
     Trainer function for FlexSLM models without KD
     """
 
+    def _inplace_kd_settings(self) -> tuple[str, float, float]:
+        mode = getattr(self.training_context, "inplace_kd", "none")
+        if mode not in ("none", "progressive", "US"):
+            raise ValueError(f"inplace_kd must be none|progressive|US, got {mode!r}")
+        return (mode,
+                getattr(self.training_context, "inplace_kd_temperature", 1.0),
+                getattr(self.training_context, "inplace_kd_ce_coefficient", 1.0))
+
+    def _reject_inplace_kd(self) -> None:
+        """For trainers that override _step without in-place KD (external-teacher / memopt)."""
+        if getattr(self.training_context, "inplace_kd", "none") != "none":
+            raise NotImplementedError(
+                f"inplace_kd is only supported by FlexLMTrainer, not {type(self).__name__}")
+
     def _select_levels(self, stage: str) -> list[int]:
         """
         Levels to run this step. Validation/test always cover every level (for
@@ -262,19 +284,37 @@ class FlexLMTrainer(FlexModelTrainer):
 
         levels = self._select_levels(stage)
 
+        inplace_kd, T, ce_coef = self._inplace_kd_settings()
+        use_kd = stage == "train" and inplace_kd != "none"
+        if use_kd:
+            levels = sorted(levels, reverse=True)  # widest first so it can teach the rest
+
         total_loss = 0.0
         vocab_size = self.submodel.config.vocab_size
+        teacher_logits = None
+        full_logits = None
 
         for i in levels:
             self.submodel.set_level_use(i)
             logits = self(input_ids)  # [B, S, vocab_size]
 
             # CLM loss: predict token t+1 from token t at every position
-            loss = F.cross_entropy(
+            ce_loss = F.cross_entropy(
                 logits[:, :-1].reshape(-1, vocab_size),  # [B*(S-1), vocab_size]
                 input_ids[:, 1:].reshape(-1),            # [B*(S-1)]
             )
-            ppl = torch.exp(loss.detach())
+            ppl = torch.exp(ce_loss.detach())
+
+            if use_kd and teacher_logits is not None:
+                kd_loss = F.kl_div(
+                    F.log_softmax(logits[:, :-1] / T, dim=-1).reshape(-1, vocab_size),
+                    F.softmax(teacher_logits[:, :-1] / T, dim=-1).reshape(-1, vocab_size),
+                    reduction="batchmean",
+                ) * (T ** 2)
+                loss = kd_loss + ce_coef * ce_loss
+                self.log(f"{stage}_level{i}_kd_loss", kd_loss, prog_bar=False, sync_dist=True)
+            else:
+                loss = ce_loss
 
             self.log(f"{stage}_level{i}_loss", loss,
                      prog_bar=False, sync_dist=True)
@@ -284,6 +324,11 @@ class FlexLMTrainer(FlexModelTrainer):
             if stage == "train":
                 self.manual_backward(loss)
             total_loss += loss.clone().detach()
+
+            if use_kd:
+                if full_logits is None:
+                    full_logits = logits.detach()
+                teacher_logits = logits.detach() if inplace_kd == "progressive" else full_logits
 
         self.log(f"{stage}_loss", total_loss,
                  prog_bar=(stage != "train"), sync_dist=True)
@@ -316,6 +361,7 @@ class FlexLMKDTrainer(FlexLMTrainer):
 
     def _step(self, batch, stage: str) -> None:
         input_ids, _ = batch
+        self._reject_inplace_kd()
 
         kd_lambda    = self.training_context.kd_lambda
         T            = self.training_context.kd_temperature

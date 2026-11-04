@@ -112,7 +112,12 @@ class _MemOptMixin:
 
 
 class MemOptFlexLMTrainer(_MemOptMixin, FlexLMTrainer):
-    """FlexLMTrainer with chunked CE loss and optional activation checkpointing."""
+    """
+    FlexLMTrainer with chunked CE loss and optional activation checkpointing.
+
+    Supports the same in-place level-to-level KD as FlexLMTrainer (inplace_kd =
+    none|progressive|US), with the KL and CE terms chunked the same way.
+    """
 
     def _step(self, batch: tuple[torch.Tensor, torch.Tensor], stage: str) -> None:
         input_ids, _ = batch
@@ -126,7 +131,14 @@ class MemOptFlexLMTrainer(_MemOptMixin, FlexLMTrainer):
         chunk = self._chunk_size()
         training = stage == "train"
 
+        inplace_kd, T, ce_coef = self._inplace_kd_settings()
+        use_kd = training and inplace_kd != "none"
+        if use_kd:
+            levels = sorted(levels, reverse=True)  # widest first so it can teach the rest
+
         total_loss = 0.0
+        teacher_rows = None
+        full_rows = None
 
         for i in levels:
             self.submodel.set_level_use(i)
@@ -134,25 +146,45 @@ class MemOptFlexLMTrainer(_MemOptMixin, FlexLMTrainer):
 
             student_rows, targets, n_rows = self._flat_views(logits, input_ids, vocab_size)
             proxy = student_rows.detach().requires_grad_(True) if training else student_rows
+            kd_active = use_kd and teacher_rows is not None
 
             loss = 0.0
+            ce_total = 0.0
+            kd_total = 0.0
             for start in range(0, n_rows, chunk):
                 end = min(start + chunk, n_rows)
                 # reduction='sum' / n_rows == reduction='mean' over all rows
-                chunk_loss = F.cross_entropy(
+                ce_chunk = F.cross_entropy(
                     proxy[start:end], targets[start:end], reduction="sum") / n_rows
+                chunk_loss = ce_chunk
+                if kd_active:
+                    # kl_div(reduction='batchmean') == sum / n_rows over the same rows
+                    kd_chunk = F.kl_div(
+                        F.log_softmax(proxy[start:end] / T, dim=-1),
+                        F.softmax(teacher_rows[start:end] / T, dim=-1),
+                        reduction="sum") * (T ** 2) / n_rows
+                    chunk_loss = kd_chunk + ce_coef * ce_chunk
+                    kd_total = kd_total + kd_chunk.detach()
                 if training:
                     chunk_loss.backward()
+                ce_total = ce_total + ce_chunk.detach()
                 loss = loss + chunk_loss.detach()
 
-            ppl = torch.exp(loss)
+            ppl = torch.exp(ce_total)
 
             self.log(f"{stage}_level{i}_loss", loss, prog_bar=False, sync_dist=True)
+            if kd_active:
+                self.log(f"{stage}_level{i}_kd_loss", kd_total, prog_bar=False, sync_dist=True)
             self.log(f"{stage}_level{i}_ppl", ppl, prog_bar=(stage != "train"), sync_dist=True)
 
             if training:
                 self._push_grad_through_model(student_rows, proxy)
             total_loss += loss
+
+            if use_kd:
+                if full_rows is None:
+                    full_rows = student_rows.detach()
+                teacher_rows = student_rows.detach() if inplace_kd == "progressive" else full_rows
 
         self.log(f"{stage}_loss", total_loss, prog_bar=(stage != "train"), sync_dist=True)
 
@@ -165,6 +197,7 @@ class MemOptFlexLMKDTrainer(_MemOptMixin, FlexLMKDTrainer):
 
     def _step(self, batch, stage: str) -> None:
         input_ids, _ = batch
+        self._reject_inplace_kd()
 
         kd_lambda = self.training_context.kd_lambda
         T = self.training_context.kd_temperature
