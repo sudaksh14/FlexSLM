@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from networks.flexllama import FlexLLaMAConfig
 from training import FlexLMTrainer, FlexLMKDTrainer
-from training_memopt import MemOptFlexLMTrainer, MemOptFlexLMKDTrainer, enable_activation_checkpointing
+from training.training_memopt import MemOptFlexLMTrainer, MemOptFlexLMKDTrainer, enable_activation_checkpointing
 from config.experiments import LLaMATrainingContext, LLaMAKDTrainingContext
 
 VOCAB = 512

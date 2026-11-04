@@ -10,7 +10,7 @@
 #SBATCH --output=./jobs/%x-%j.out
 
 # Pick which SLM to train by uncommenting exactly ONE of the CONFIG= lines
-# below, then: sbatch submit_flexllama_choose_slm.sh
+# below, then: sbatch scripts/submit_flexllama_choose_slm.sh
 #
 # Uncomment exactly one - if more than one is uncommented, bash just keeps
 # reassigning CONFIG top to bottom, so the last uncommented line silently
@@ -60,4 +60,4 @@ conda activate my_env
 
 nvidia-smi
 
-exec "$SLURM_SUBMIT_DIR/experiment_job.sh" "$CONFIG"
+exec "$SLURM_SUBMIT_DIR/scripts/experiment_job.sh" "$CONFIG"

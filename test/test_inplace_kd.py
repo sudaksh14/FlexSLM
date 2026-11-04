@@ -7,7 +7,7 @@ import torch.nn as nn
 import pytorch_lightning as pl
 
 import training
-import training_memopt
+import training.training_memopt as training_memopt
 
 
 class _TinyLM(nn.Module):

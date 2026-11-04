@@ -26,14 +26,14 @@
 #          accordingly for models with more levels, or narrow --tasks.
 #
 # Usage:
-#   sbatch eval_job.sh wiki <config> [dataset] [batch_size]
-#   sbatch eval_job.sh lm   <config> [tasks] [batch_size]
+#   sbatch eval/eval_job.sh wiki <config> [dataset] [batch_size]
+#   sbatch eval/eval_job.sh lm   <config> [tasks] [batch_size]
 #
-#   sbatch eval_job.sh wiki flexllama,fineweb.kd_lambda05_1p4B
-#   sbatch eval_job.sh lm   flexllama,fineweb.kd_lambda05_1p4B lambada_openai,hellaswag 4
+#   sbatch eval/eval_job.sh wiki flexllama,fineweb.kd_lambda05_1p4B
+#   sbatch eval/eval_job.sh lm   flexllama,fineweb.kd_lambda05_1p4B lambada_openai,hellaswag 4
 
-MODE=${1:?"usage: sbatch eval_job.sh <wiki|lm> <config> [...]"}
-CONFIG=${2:?"usage: sbatch eval_job.sh <wiki|lm> <config> [...]"}
+MODE=${1:?"usage: sbatch eval/eval_job.sh <wiki|lm> <config> [...]"}
+CONFIG=${2:?"usage: sbatch eval/eval_job.sh <wiki|lm> <config> [...]"}
 
 source "$HOME/miniconda3/etc/profile.d/conda.sh"
 conda activate my_env
@@ -45,7 +45,7 @@ case "$MODE" in
     DATASET=${3:-wikitext-103-raw-v1}
     BATCH_SIZE=${4:-8}
     echo "[eval_job:wiki] config=$CONFIG dataset=$DATASET batch_size=$BATCH_SIZE"
-    python3 eval_wikitext103.py --config "$CONFIG" --dataset "$DATASET" --batch_size "$BATCH_SIZE"
+    python3 -m eval.eval_wikitext103 --config "$CONFIG" --dataset "$DATASET" --batch_size "$BATCH_SIZE"
     ;;
   lm)
     TASKS=${3:-"wikitext,lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,openbookqa,triviaqa"}
@@ -53,7 +53,7 @@ case "$MODE" in
     SAFE_NAME=$(echo "$CONFIG" | tr ',/' '__')
     OUT="results/${SAFE_NAME}.json"
     echo "[eval_job:lm] config=$CONFIG tasks=$TASKS batch_size=$BATCH_SIZE output=$OUT"
-    python3 eval_lm_harness.py --config "$CONFIG" --tasks "$TASKS" --batch_size "$BATCH_SIZE" --output "$OUT"
+    python3 -m eval.eval_lm_harness --config "$CONFIG" --tasks "$TASKS" --batch_size "$BATCH_SIZE" --output "$OUT"
     ;;
   *)
     echo "ERROR: unknown mode '$MODE' - expected 'wiki' or 'lm'" >&2

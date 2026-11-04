@@ -12,8 +12,8 @@
 # One-off tokenization of FineWeb-Edu into flat .bin files for the memmap data
 # pipeline. Run once per tokenizer:
 #
-#   sbatch prepare_fineweb.sh JackFram/llama-160m
-#   sbatch prepare_fineweb.sh Qwen/Qwen2.5-1.5B 1.4e9
+#   sbatch data/prepare_fineweb.sh JackFram/llama-160m
+#   sbatch data/prepare_fineweb.sh Qwen/Qwen2.5-1.5B 1.4e9
 #
 # $1 = HF tokenizer name (default llama-160m), $2 = training tokens (default 1.4e9).
 # CPU-only work, but the partition requires a GPU allocation, so it takes 1.
@@ -35,4 +35,4 @@ conda activate my_env
 
 cd "$SLURM_SUBMIT_DIR"
 echo "Preparing FineWeb-Edu ($SAMPLE) for tokenizer=$TOKENIZER max_tokens=$MAX_TOKENS"
-python3 prepare_fineweb.py --tokenizer "$TOKENIZER" --max-tokens "$MAX_TOKENS" --sample "$SAMPLE"
+python3 -m data.prepare_fineweb --tokenizer "$TOKENIZER" --max-tokens "$MAX_TOKENS" --sample "$SAMPLE"

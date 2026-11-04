@@ -34,7 +34,7 @@ directly comparable against the training.py trainers.
 import torch
 import torch.nn.functional as F
 
-from training import FlexLMTrainer, FlexLMKDTrainer
+from .training import FlexLMTrainer, FlexLMKDTrainer
 
 DEFAULT_LOSS_CHUNK_SIZE = 1024
 

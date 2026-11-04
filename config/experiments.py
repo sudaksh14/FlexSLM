@@ -9,7 +9,7 @@ import torch
 import torch.optim as optim
 
 from training import FlexLMTrainer, FlexLMKDTrainer
-from training_memopt import MemOptFlexLMKDTrainer, memopt
+from training.training_memopt import MemOptFlexLMKDTrainer, memopt
 
 
 class GPTTrainingContext(FlexTrainingContext):

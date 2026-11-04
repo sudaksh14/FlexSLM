@@ -39,15 +39,15 @@ one that matches what your config needs; none of them replace the others.
   attached to the loader since streaming datasets have no exact `len()`.
   Used by the `fineweb.*` configs.
 - **Memmap** (`load_fineweb_edu_memmap` / `_MemmapWindowDataset`) — requires
-  running `prepare_fineweb.py` first to tokenize the corpus into a `np.memmap`
+  running `data/prepare_fineweb.py` first to tokenize the corpus into a `np.memmap`
   `.bin` file under `SCRATCH_PATH/fineweb_bin/<tokenizer>/`. Map-style
   `Dataset`, so `DistributedSampler` shards it exactly and `len()` is exact —
   no memory growth over a long run (verified flat over 2000+ batches, unlike
   streaming). Used by the `fineweb_mm.*` and `fineweb_nc.*` configs.
-- `prepare_fineweb.py` is a standalone step, **not** wired into
-  `experiment_job.sh` — run it explicitly before using a memmap config:
+- `data/prepare_fineweb.py` is a standalone step, **not** wired into
+  `scripts/experiment_job.sh` — run it explicitly before using a memmap config:
   ```
-  sbatch prepare_fineweb.sh <tokenizer_name> [--sample sample-10BT|sample-100BT|sample-350BT]
+  sbatch data/prepare_fineweb.sh <tokenizer_name> [--sample sample-10BT|sample-100BT|sample-350BT]
   ```
 
 WikiText-103 (`load_wikitext`, used for eval only) takes a `tokenizer_name`
@@ -67,7 +67,7 @@ random sample of the rest.
   conflicts with FSDP's single-forward-per-step hook state machine
   (`Expects BACKWARD_PRE or BACKWARD_POST ... but got FORWARD`). Stick to DDP;
   reduce `batch_size` if a config needs more memory headroom.
-- **`training_memopt.py`** is a separate trainer (`MemOptFlexLMTrainer` /
+- **`training/training_memopt.py`** is a separate trainer (`MemOptFlexLMTrainer` /
   `MemOptFlexLMKDTrainer`) for configs that OOM under normal DDP — chiefly KD
   against large-vocabulary teachers (e.g. Qwen2.5's 151936-token vocab blows
   up the softmax/KL-div tensors). It chunks the loss computation (numerically
@@ -103,7 +103,7 @@ Experiments are looked up as `"<arch>,<name>"` (e.g.
 ## Running experiments
 
 ```
-sbatch experiment_job.sh <config> [hardware_config]
+sbatch scripts/experiment_job.sh <config> [hardware_config]
 ```
 or, to submit every experiment registered under a group at once:
 ```
@@ -115,12 +115,12 @@ pipeline and token-horizon math — not part of the FlexSLM pipeline itself.
 
 ## Evaluation
 
-`eval_job.sh` is the single dispatcher for evaluating a completed checkpoint
+`eval/eval_job.sh` is the single dispatcher for evaluating a completed checkpoint
 (`saved_models/<config>.pt`, written by `utils.save_model()`):
 
 ```
-sbatch eval_job.sh wiki <config> [dataset] [batch_size]   # eval_wikitext103.py
-sbatch eval_job.sh lm   <config> [tasks] [batch_size]     # eval_lm_harness.py
+sbatch eval/eval_job.sh wiki <config> [dataset] [batch_size]   # eval/eval_wikitext103.py
+sbatch eval/eval_job.sh lm   <config> [tasks] [batch_size]     # eval_lm_harness.py
 ```
 
 - `wiki` — fast per-flex-level WikiText-103 token perplexity, a quick sanity
@@ -133,7 +133,7 @@ sbatch eval_job.sh lm   <config> [tasks] [batch_size]     # eval_lm_harness.py
 - `lm` — full [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness)
   suite (`wikitext, lambada_openai, hellaswag, piqa, arc_easy, arc_challenge,
   openbookqa, triviaqa` by default) via the `@register_model("flexllama")` /
-  `FlexGPTLMEval`/`FlexLLaMALMEval` classes in `eval_lm_harness.py`, looping
+  `FlexGPTLMEval`/`FlexLLaMALMEval` classes in `eval/eval_lm_harness.py`, looping
   over every flex level. Needs the `lm_eval` package (pins
   `datasets==3.6.0` — verified the streaming/memmap FineWeb-Edu pipelines are
   unaffected by that downgrade from 4.5.0). Budget `--time` generously: one
@@ -142,7 +142,7 @@ sbatch eval_job.sh lm   <config> [tasks] [batch_size]     # eval_lm_harness.py
   from a previous run) can finish all levels in well under that. Tokenizer
   resolution (`--tokenizer` override → KD teacher → warm-start source →
   architecture default) and the pre-flight vocab-size check are shared with
-  `wiki` mode via `eval_wikitext103.resolve_tokenizer_name`.
+  `wiki` mode via `eval.eval_wikitext103.resolve_tokenizer_name`.
 
 ## SLURM environment notes
 
@@ -165,7 +165,7 @@ sbatch eval_job.sh lm   <config> [tasks] [batch_size]     # eval_lm_harness.py
   the repo root — set `PYTHONPATH="$SLURM_SUBMIT_DIR"` in the job script.
 - TQDM progress bars are `\r`-delimited — pipe a `.out` file through
   `tr '\r' '\n'` before grepping it for anything but the literal last line.
-- **Open item**: `submit_flexllama_4gpu.sh` doesn't set `--open-mode=append`,
+- **Open item**: `scripts/submit_flexllama_4gpu.sh` doesn't set `--open-mode=append`,
   so a requeued/restarted job overwrites its own prior log content in place
   (training itself resumes correctly from `last.ckpt` — only log *history*
   is lost). Proposed fix not yet applied.
@@ -185,5 +185,5 @@ sanity checks (`test_modules.py`, `test_training.py`, `test_delta_manager.py`).
 FlexSLM began as **FlexViT**, a slimmable Vision Transformer trained on
 ImageNet-1k/CIFAR-10 (see git history prior to the `FlexSLM` commit for the
 original vision-only workflow: `flex_modules/`'s conv2d/batchnorm/class-token
-modules and `plot.py` are holdovers from that era). The project was then
+modules and `scripts/plot.py` are holdovers from that era). The project was then
 extended to language models (FlexGPT, FlexLLaMA) with all of the above.

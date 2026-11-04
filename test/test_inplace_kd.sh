@@ -9,8 +9,8 @@
 #SBATCH --mem=60G
 #SBATCH --output=./jobs/%x-%j.out
 
-# CPU-only unit tests for in-place level-to-level KD (inplace_kd) in
-# FlexLMTrainer / MemOptFlexLMTrainer. Submit from the repo root.
+# CPU-only unit tests for in-place level-to-level KD (inplace_kd) plus import smoke tests for the
+# relocated training/scripts/eval/data packages. Submit from the repo root.
 cd "$SLURM_SUBMIT_DIR"
 export PYTHONPATH="$SLURM_SUBMIT_DIR"
-python3 -m unittest test.test_inplace_kd -v
+python3 -m unittest test.test_inplace_kd test.test_imports -v

@@ -15,9 +15,9 @@
 # directly comparable to the non-memopt configs.
 #
 # Pick a config by uncommenting exactly ONE CONFIG= line, then:
-#   sbatch submit_flexllama_memopt.sh
+#   sbatch scripts/submit_flexllama_memopt.sh
 # Or override from the command line:
-#   sbatch submit_flexllama_memopt.sh flexllama,fineweb.kd_smollm2_1p7b_warmstart_memopt
+#   sbatch scripts/submit_flexllama_memopt.sh flexllama,fineweb.kd_smollm2_1p7b_warmstart_memopt
 #
 # 4x RTX 6000 Ada (48GB). cpus-per-task=32 x ntasks=4 = 128 satisfies the
 # performance partition's 32 CPUs/GPU ratio; mem must be explicit (not 0).
@@ -46,4 +46,4 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 nvidia-smi
 
-exec "$SLURM_SUBMIT_DIR/experiment_job.sh" "$CONFIG" "${2:-}"
+exec "$SLURM_SUBMIT_DIR/scripts/experiment_job.sh" "$CONFIG" "${2:-}"

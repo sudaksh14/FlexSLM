@@ -3,7 +3,7 @@ A/B peak-GPU-memory benchmark: training.py trainer vs training_memopt.py trainer
 on the real Qwen2.5-1.5B warm-start config dims (V=151936). Single GPU - DDP
 replicates per-rank, so per-GPU peak is what decides whether a config fits.
 
-Run via bench_memopt.sh (sbatch), not directly.
+Run via scripts/bench_memopt.sh (sbatch), not directly.
 """
 import sys
 import types
@@ -35,7 +35,7 @@ def run(config_key, batch_size, seq_len, steps=3):
     trainer.cuda().train()
     trainer._ensure_teacher()
     if getattr(ctx, 'activation_checkpointing', False):
-        from training_memopt import enable_activation_checkpointing
+        from training.training_memopt import enable_activation_checkpointing
         n = enable_activation_checkpointing(trainer.submodel)
         print(f"    activation checkpointing on {n} blocks", flush=True)
 

@@ -9,7 +9,7 @@ import wandb
 import utils
 
 import config.paths as paths
-import run_experiment
+import scripts.run_experiment as run_experiment
 import training
 
 

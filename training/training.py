@@ -168,7 +168,7 @@ class FlexModelTrainer(pl.LightningModule, BaseTrainer):
         if self.training_context.load_from is None:
             return
 
-        from run_experiment import resolve_from_str
+        from scripts.run_experiment import resolve_from_str
         load_from_tconfig: TrainerBuilder = resolve_from_str(
             self.training_context.load_from)
         lmodel = utils.load_model(

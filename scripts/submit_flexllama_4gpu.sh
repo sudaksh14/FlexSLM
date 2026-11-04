@@ -15,7 +15,7 @@
 # this cluster's scheduler rejects --mem=0 on multi-GPU/multi-task submissions;
 # 180G stays under the partition's ~185G ceiling at 64 CPUs (MaxMemPerCPU=2960MB).
 #
-# Usage: sbatch submit_flexllama_4gpu.sh [config_name]
+# Usage: sbatch scripts/submit_flexllama_4gpu.sh [config_name]
 # Defaults to the llama-160m KD run over the ~1.4B-token FineWeb-Edu slice.
 
 source "$HOME/miniconda3/etc/profile.d/conda.sh"
@@ -25,4 +25,4 @@ nvidia-smi
 
 CONFIG=${1:-flexllama,fineweb.kd_lambda05_1p4B}
 
-exec "$SLURM_SUBMIT_DIR/experiment_job.sh" "$CONFIG"
+exec "$SLURM_SUBMIT_DIR/scripts/experiment_job.sh" "$CONFIG"

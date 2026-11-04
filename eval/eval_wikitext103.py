@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from run_experiment import resolve_from_str
+from scripts.run_experiment import resolve_from_str
 from utils import load_model, load_wikitext
 
 

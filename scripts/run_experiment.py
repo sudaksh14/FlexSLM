@@ -51,7 +51,7 @@ def print_all_conf_commands(conf, basestr, file=sys.stdout) -> None:
         hconf = resolve_from_str(s, HARDWARE, return_on_index_error=True)
         if not isinstance(hconf, config.hardware.HardwareConfig):
             hconf = DEFAULT_HARDWARE_CONFIG
-        print(f"{hconf.format_as_slurm_args()} experiment_job.sh {s}", file=file)
+        print(f"{hconf.format_as_slurm_args()} scripts/experiment_job.sh {s}", file=file)
 
 
 if __name__ == "__main__":

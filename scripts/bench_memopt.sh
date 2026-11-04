@@ -24,4 +24,4 @@ conda activate my_env
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 cd "$SLURM_SUBMIT_DIR"
-python3 bench_memopt.py
+python3 -m scripts.bench_memopt

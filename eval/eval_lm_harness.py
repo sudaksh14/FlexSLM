@@ -138,9 +138,9 @@ class FlexLLaMALMEval(FlexGPTLMEval):
 
 
 if __name__ == "__main__":
-    from run_experiment import resolve_from_str
+    from scripts.run_experiment import resolve_from_str
     from utils import load_model
-    from eval_wikitext103 import resolve_tokenizer_name
+    from eval.eval_wikitext103 import resolve_tokenizer_name
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="flexgpt,wikitext103.gpt2pretrained")
