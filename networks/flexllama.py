@@ -25,6 +25,11 @@ class FlexLLaMAConfig(FlexModelConfig):
     qkv_bias: bool = False  # True for Qwen2-family checkpoints; LLaMA family has no attention bias
     qk_norm: bool = False   # True for Qwen3-family checkpoints: per-head RMSNorm on q and k
     pretrained_hf_model: Optional[str] = None
+    # Fixed per-head size shared by every level. None keeps the original convention
+    # head_dim = hidden_dims[l] // num_heads[l] (so num_heads * head_dim == hidden).
+    # Set it for checkpoints where that does not hold, e.g. Qwen3-0.6B (hidden 1024,
+    # 16 heads, head_dim 128): q/o projections then map hidden <-> num_heads * head_dim.
+    head_dim: Optional[int] = None
 
     def make_model(self) -> 'FlexLLaMA':
         return FlexLLaMA(self)
@@ -71,6 +76,7 @@ class LLaMADecoderBlock(nn.Module):
         num_kv_heads: Iterable[int] = None,
         qkv_bias: bool = False,
         qk_norm: bool = False,
+        head_dim: Optional[int] = None,
     ):
         super().__init__()
         self.input_layernorm          = fm.RMSNorm(hidden_dims, eps=rms_norm_eps)
@@ -80,7 +86,8 @@ class LLaMADecoderBlock(nn.Module):
                                                          max_seq_len=max_seq_len,
                                                          qkv_bias=qkv_bias,
                                                          qk_norm=qk_norm,
-                                                         rms_norm_eps=rms_norm_eps)
+                                                         rms_norm_eps=rms_norm_eps,
+                                                         head_dim=head_dim)
         self.post_attention_layernorm = fm.RMSNorm(hidden_dims, eps=rms_norm_eps)
         self.mlp                      = LLaMAMLPBlock(hidden_dims, intermediate_dims)
 
@@ -115,6 +122,7 @@ class FlexLLaMA(FlexModel):
                 config.rope_theta, config.rms_norm_eps, config.max_seq_length,
                 num_kv_heads=num_kv_heads, qkv_bias=config.qkv_bias,
                 qk_norm=getattr(config, "qk_norm", False),
+                head_dim=getattr(config, "head_dim", None),
             ) for i in range(config.num_layers)}
         ))
 

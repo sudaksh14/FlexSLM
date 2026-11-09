@@ -9,7 +9,7 @@ import torch
 import torch.optim as optim
 
 from training import FlexLMTrainer, FlexLMKDTrainer
-from training_memopt import MemOptFlexLMKDTrainer, memopt
+from training.memopt import MemOptFlexLMKDTrainer, memopt
 
 
 class GPTTrainingContext(FlexTrainingContext):
@@ -120,7 +120,41 @@ class LLaMAKDTrainingContext(FlexLMKDTrainingContext):
 torch.serialization.add_safe_globals([GPTTrainingContext, FlexLMKDTrainingContext, LLaMATrainingContext, LLaMAKDTrainingContext])
 
 
-def _flex_llama_dims(hidden, heads, kv_heads, intermediate, n_levels=3, min_frac=None, fractions=None):
+def _flex_llama_dims_fixed_head(hidden, heads, kv_heads, intermediate, head_dim, fractions):
+    """
+    Level dims for checkpoints with a fixed head size that need not equal
+    hidden // heads (e.g. Qwen3-0.6B: hidden 1024, 16 heads, head_dim 128).
+
+    Unlike _flex_llama_dims, every level keeps the checkpoint's query-heads-per-KV-
+    group ratio, so a level's query head i reads the same KV group it read in the
+    full pretrained model (head i -> group i // ratio). Head counts are rounded to
+    a multiple of that ratio; hidden and intermediate widths to multiples of 64.
+    Returns (hidden_dims, num_heads, num_kv_heads, intermediate_dims).
+    """
+    assert heads % kv_heads == 0, "heads must be a multiple of kv_heads"
+    ratio = heads // kv_heads
+    hs, hd, kvs, im = [], [], [], []
+    for i, frac in enumerate(fractions):
+        is_last = (i == len(fractions) - 1)
+        if is_last:
+            n, h, m = heads, hidden, intermediate
+        else:
+            n = min(heads, max(ratio, round(heads * frac / ratio) * ratio))
+            h = min(hidden, max(64, round(hidden * frac / 64) * 64))
+            m = min(intermediate, max(64, round(intermediate * frac / 64) * 64))
+        if hs and n <= hs[-1]:
+            raise ValueError(f"fractions {fractions} give non-increasing head counts {hs + [n]}")
+        if hd and (h <= hd[-1] or m <= im[-1]):
+            raise ValueError(f"fractions {fractions} give non-increasing widths")
+        hs.append(n)
+        kvs.append(n // ratio)
+        hd.append(h)
+        im.append(m)
+    return tuple(hd), tuple(hs), tuple(kvs), tuple(im)
+
+
+def _flex_llama_dims(hidden, heads, kv_heads, intermediate, n_levels=3, min_frac=None, fractions=None,
+                     head_dim=None):
     """
     Builds increasing (hidden_dims, num_heads, num_kv_heads, intermediate_dims)
     tuples for a multi-level FlexLLaMAConfig whose max level exactly matches a
@@ -139,6 +173,10 @@ def _flex_llama_dims(hidden, heads, kv_heads, intermediate, n_levels=3, min_frac
         fractions = [1.0] if n_levels == 1 else [
             min_frac + (1.0 - min_frac) * i / (n_levels - 1) for i in range(n_levels)
         ]
+
+    if head_dim is not None:
+        # Presets that declare head_dim use the fixed-head, GQA-preserving builder.
+        return _flex_llama_dims_fixed_head(hidden, heads, kv_heads, intermediate, head_dim, fractions)
 
     head_dim = hidden // heads
 
@@ -250,6 +288,29 @@ TEACHER_PRESETS = {
         qk_norm=True,
         dims_spec=dict(hidden=2048, heads=16, kv_heads=8, intermediate=6144),
     ),
+    # Paper backbone (IEA/AIE 2027). Qwen3-0.6B's head_dim (128) is not
+    # hidden // heads (64), so the dims_spec declares it; this also selects the
+    # GQA-preserving level builder (_flex_llama_dims_fixed_head). Config values
+    # checked against huggingface.co/Qwen/Qwen3-0.6B/config.json on 2026-11-09.
+    "qwen3-0.6b": dict(
+        hf_model="Qwen/Qwen3-0.6B", vocab_size=151936, num_layers=28,
+        rope_theta=1000000.0, rms_norm_eps=1e-6, tie_embeddings=True, qkv_bias=False,
+        qk_norm=True,
+        dims_spec=dict(hidden=1024, heads=16, kv_heads=8, intermediate=3072, head_dim=128),
+    ),
+    # Qwen3-1.7B with the GQA-preserving level builder (head_dim 128 == hidden // heads
+    # here, so only the level shapes differ from "qwen3-1.7b", whose levels did not
+    # keep each query head on its pretrained KV group). For the final-recipe runs.
+    "qwen3-1.7b-gqa": dict(
+        hf_model="Qwen/Qwen3-1.7B", vocab_size=151936, num_layers=28,
+        rope_theta=1000000.0, rms_norm_eps=1e-6, tie_embeddings=True, qkv_bias=False,
+        qk_norm=True,
+        dims_spec=dict(hidden=2048, heads=16, kv_heads=8, intermediate=6144, head_dim=128),
+    ),
+    # Larger Qwen3 models, used only as frozen or separately fine-tuned KD teachers
+    # (same 151,936-token vocabulary). Never warm-started into a FlexLLaMA.
+    "qwen3-4b": dict(hf_model="Qwen/Qwen3-4B", vocab_size=151936),
+    "qwen3-8b": dict(hf_model="Qwen/Qwen3-8B", vocab_size=151936),
 }
 
 _WARMSTART_FIELDS = ("num_layers", "dims_spec", "rope_theta", "rms_norm_eps",
@@ -328,7 +389,7 @@ def make_flexllama_kd(teacher: str, **kd_kwargs) -> TrainerBuilder:
 
 def make_flexllama_warmstart_kd(teacher: str, n_levels: int = 3, min_frac: float = None,
                                  memory_optimized: bool = False, loss_chunk_size: int = 1024,
-                                 kd_teacher: str = None, **kd_kwargs) -> TrainerBuilder:
+                                 kd_teacher: str = None, fractions=None, **kd_kwargs) -> TrainerBuilder:
     """Same KD training algorithm as make_flexllama_kd, but the student's max
     level is built to match `teacher`'s real architecture exactly and is
     warm-started from its pretrained weights (FlexLLaMAConfig.pretrained_hf_model),
@@ -371,8 +432,10 @@ def make_flexllama_warmstart_kd(teacher: str, n_levels: int = 3, min_frac: float
             f"vocab_size={preset['vocab_size']}. KD requires student/teacher "
             f"logits to line up index-for-index over a shared vocab/tokenizer."
         )
+    if fractions is not None:
+        n_levels = len(fractions)
     hidden_dims, num_heads, num_kv_heads, intermediate_dims = _flex_llama_dims(
-        **preset["dims_spec"], n_levels=n_levels, min_frac=min_frac)
+        **preset["dims_spec"], n_levels=n_levels, min_frac=min_frac, fractions=fractions)
     kd_kwargs = _label_levels(kd_kwargs, n_levels)
     builder = TrainerBuilder(
         MemOptFlexLMKDTrainer if memory_optimized else FlexLMKDTrainer,
@@ -389,6 +452,7 @@ def make_flexllama_warmstart_kd(teacher: str, n_levels: int = 3, min_frac: float
             qkv_bias=preset["qkv_bias"],
             qk_norm=preset.get("qk_norm", False),
             pretrained_hf_model=preset["hf_model"],
+            head_dim=preset["dims_spec"].get("head_dim"),
         ),
         LLaMAKDTrainingContext(
             teacher_hf_model=kd_preset["hf_model"],
@@ -810,7 +874,7 @@ CONFIGS = {
         # Same training algorithm as the streaming configs above; only the data
         # pipeline differs - pre-tokenized .bin files read via np.memmap instead of
         # re-tokenizing the HF stream every epoch. Requires a one-off prepare pass
-        # per tokenizer first:  sbatch prepare_fineweb.sh <hf-tokenizer-name>
+        # per tokenizer first:  sbatch scripts/prepare_fineweb.sh <hf-tokenizer-name>
         'fineweb_mm.kd_lambda05': TrainerBuilder(
             FlexLMKDTrainer,
             FlexLLaMAConfig(pretrained_hf_model="JackFram/llama-160m"),
@@ -855,21 +919,21 @@ CONFIGS = {
             LLaMAKDTrainingContext(
                 dataset="fineweb-edu-memmap",
                 kd_lambda=0.5, kd_temperature=2.0, epochs=1, patience=1,
-                # sbatch prepare_fineweb.sh JackFram/llama-160m 1.654e9
+                # sbatch scripts/prepare_fineweb.sh JackFram/llama-160m 1.654e9
                 wandb_project_name="FlexLLaMA_finewebnc_kd_lambda05_r12",
             ),
         ),
         'fineweb_nc.kd_smollm2_360m_warmstart_r12': make_flexllama_warmstart_kd(
             "smollm2-360m", dataset="fineweb-edu-memmap",
             kd_lambda=0.5, kd_temperature=2.0, epochs=1, patience=1,
-            # sbatch prepare_fineweb.sh HuggingFaceTB/SmolLM2-360M 4.342e9
+            # sbatch scripts/prepare_fineweb.sh HuggingFaceTB/SmolLM2-360M 4.342e9
             wandb_project_name="FlexLLaMA_finewebnc_kd_smollm2_360m_r12",
         ),
         'fineweb_nc.kd_qwen25_0p5b_warmstart_r12': make_flexllama_warmstart_kd(
             "qwen2.5-0.5b", dataset="fineweb-edu-memmap",
             memory_optimized=True, loss_chunk_size=512,
             kd_lambda=0.5, kd_temperature=2.0, epochs=1, patience=1,
-            # sbatch prepare_fineweb.sh Qwen/Qwen2.5-0.5B 5.928e9   (22 GiB, uint32)
+            # sbatch scripts/prepare_fineweb.sh Qwen/Qwen2.5-0.5B 5.928e9   (22 GiB, uint32)
             wandb_project_name="FlexLLaMA_finewebnc_kd_qwen25_0p5b_r12",
         ),
         'fineweb_nc.kd_tinyllama_warmstart_r8': make_flexllama_warmstart_kd(
@@ -878,7 +942,7 @@ CONFIGS = {
             kd_lambda=0.5, kd_temperature=2.0, epochs=1, patience=1,
             # ratio 8 (speedrun setting), not 12: ratio 12 would need 12.4B tokens,
             # past what sample-10BT holds.
-            # sbatch prepare_fineweb.sh TinyLlama/TinyLlama-1.1B-Chat-v1.0 8.276e9
+            # sbatch scripts/prepare_fineweb.sh TinyLlama/TinyLlama-1.1B-Chat-v1.0 8.276e9
             wandb_project_name="FlexLLaMA_finewebnc_kd_tinyllama_r8",
         ),
         # These two exceed sample-10BT (10B tokens) at ratio 12, so prepare needs
@@ -889,7 +953,7 @@ CONFIGS = {
             memory_optimized=True, loss_chunk_size=512,
             kd_lambda=0.5, kd_temperature=2.0, epochs=1, patience=1,
             batch_size=4,
-            # sbatch prepare_fineweb.sh Qwen/Qwen2.5-1.5B 1.8524553216e10 sample-100BT   (69.0 GiB, uint32)
+            # sbatch scripts/prepare_fineweb.sh Qwen/Qwen2.5-1.5B 1.8524553216e10 sample-100BT   (69.0 GiB, uint32)
             wandb_project_name="FlexLLaMA_finewebnc_kd_qwen25_1p5b_r12",
         ),
         'fineweb_nc.kd_smollm2_1p7b_warmstart_r12': make_flexllama_warmstart_kd(
@@ -897,7 +961,7 @@ CONFIGS = {
             memory_optimized=True, loss_chunk_size=512,
             kd_lambda=0.5, kd_temperature=2.0, epochs=1, patience=1,
             batch_size=4,
-            # sbatch prepare_fineweb.sh HuggingFaceTB/SmolLM2-1.7B 2.0536492032e10 sample-100BT   (38.3 GiB, uint16)
+            # sbatch scripts/prepare_fineweb.sh HuggingFaceTB/SmolLM2-1.7B 2.0536492032e10 sample-100BT   (38.3 GiB, uint16)
             wandb_project_name="FlexLLaMA_finewebnc_kd_smollm2_1p7b_r12",
         ),
         'fineweb.kd_lambda05_5levels': TrainerBuilder(
@@ -975,5 +1039,5 @@ CONFIGS['flexllama']['pmc.full5ep'].training_context.patience = 1000  # run all 
 CONFIGS['flexllama']['pmc.full5ep'].training_context.epochs = 5
 
 
-from sft import register_sft_configs
+from training.sft import register_sft_configs
 register_sft_configs(CONFIGS)

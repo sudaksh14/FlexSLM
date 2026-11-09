@@ -5,9 +5,13 @@ import utils
 @dataclasses.dataclass
 class HardwareConfig(utils.SelfDescripting):
     """
-    This class stores the hardware configuration of the node(s) running an experiment.
+    Hardware configuration of the node(s) running an experiment, used by
+    `run_experiment.py listcommand` to print sbatch arguments.
+
+    Defaults follow the DAS-6 rules: GPU jobs on the `defq` partition with
+    --gres=gpu:N, and never a memory request (every job owns its whole node).
     """
-    partition: str = 'gpu_h100'
+    partition: str = 'defq'
     gpu_count: int = 1
     time: str = '24:00:00'
 
@@ -18,10 +22,10 @@ class HardwareConfig(utils.SelfDescripting):
 
     def format_as_slurm_args(self) -> str:
         """
-        This formats the configuration into arguments as passed to sbatch or srun.
-        This is used to reserve nodes for experiments with their associated hardware requirements.
+        Formats the configuration as sbatch/srun arguments.
         """
-        return f"--nodes {self.node_count} -p {self.partition} --time {self.time} --gpus-per-node={self.gpu_count} --ntasks-per-node={self.gpu_count} --mem=0"
+        return (f"--nodes {self.node_count} -p {self.partition} --time {self.time} "
+                f"--gres=gpu:{self.gpu_count} --ntasks-per-node={self.gpu_count}")
 
 
 class CurrentDevice:
@@ -38,24 +42,5 @@ class CurrentDevice:
 
 DEFAULT_HARDWARE_CONFIG = HardwareConfig()
 HARDWARE = {
-    "vitprebuild": HardwareConfig(
-        gpu_count=4, time='00:30:00'),
-    "flexvit": {
-        "cifar10.5levels": HardwareConfig(
-            gpu_count=4,
-            time='12:00:00'),
-        "imagenet": HardwareConfig(
-            gpu_count=4,
-            time='24:00:00'),
-        "imagenet_constant_scale": HardwareConfig(
-            gpu_count=4,
-            time='24:00:00'),
-    },
-    "flexvitcorrect": HardwareConfig(
-        gpu_count=4,
-        time='24:00:00'),
-    "flexllama": HardwareConfig(
-        partition='performance',
-        gpu_count=1,
-        time='48:00:00'),
+    "flexllama": HardwareConfig(gpu_count=1, time='48:00:00'),
 }

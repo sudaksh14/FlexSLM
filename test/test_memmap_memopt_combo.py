@@ -16,7 +16,7 @@ import torch
 import utils
 from utils import load_fineweb_edu_memmap
 from networks.flexllama import FlexLLaMAConfig
-from training_memopt import MemOptFlexLMKDTrainer, enable_activation_checkpointing
+from training.memopt import MemOptFlexLMKDTrainer, enable_activation_checkpointing
 from config.experiments import CONFIGS, LLaMAKDTrainingContext
 
 VOCAB = 32000

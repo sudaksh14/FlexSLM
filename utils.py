@@ -3,21 +3,13 @@ import shutil
 import os
 import io
 
-from torchvision.transforms import (
-    Compose, RandomHorizontalFlip, RandomRotation,
-    ColorJitter, ToTensor, Normalize, Resize, CenterCrop, ConvertImageDtype, RandAugment
-)
-from torchvision.transforms.functional import InterpolationMode
-from torchvision.datasets import CIFAR10, CIFAR100, ImageFolder
-from sklearn.metrics import accuracy_score
 from torch.utils.data import DataLoader, TensorDataset
 from torch import nn
 import numpy as np
 import torch
 import tqdm
-from timm.data import Mixup
 from flex_modules.module import Module
-from networks.modules import ClassTokenLayer, PosEmbeddingLayer, LinearHead, LayerScale
+from networks.modules import PosEmbeddingLayer, LinearHead
 import config.paths as paths
 
 
@@ -29,33 +21,40 @@ def get_device() -> 'str':
                         "cuda" if torch.cuda.is_available() else "cpu")
 
 
-def make_str_filename_safe(s: str):
-    prefix_char = 'x'
-    forbidden_chars = [
-        ('x', 'xx'),
-        ('/', 'xa'),
-        ('<', 'xb'),
-        ('>', 'xc'),
-        (':', 'xd'),
-        ('"', 'xe'),
-        ('/', 'xf'),
-        ('\\', 'xg'),
-        ('|', 'xh'),
-        ('?', 'xi'),
-        ('*', 'xj'),
-        ('(', 'xk'),
-        (')', 'xl'),
-        ('.', 'xm'),
-        (',', 'xn'),
-        ('\'', 'xo')
-    ]
+def make_str_filename_safe(s: str) -> str:
+    """Readable file/directory name for a config string such as
+    "flexllama,sft.paper.qwen3_1p7b_teacher" -> "flexllama__sft.paper.qwen3_1p7b_teacher".
+    The config separator ',' becomes '__'; characters that are unsafe in file
+    names on Linux or Windows become '_'. Dots are kept (they are safe and
+    appear in config names). Used for checkpoint dirs, saved models and exports."""
+    s = s.replace(",", "__")
+    for ch in ['/', '\\', '<', '>', ':', '"', '|', '?', '*', '(', ')', "'", ' ']:
+        s = s.replace(ch, "_")
+    return s
 
-    description = s
-    description = description.replace(
-        prefix_char, f"{prefix_char}{prefix_char}")
+
+def legacy_str_filename_safe(s: str) -> str:
+    """The escaping used before 2026-11-09 ('x' -> 'xx', ',' -> 'xn', '.' -> 'xm',
+    ...), which produced names like "flexxxxllamaxnsftxmmedmixxxx_qwen3_1p7b".
+    Kept only to find checkpoints and exports written under the old names."""
+    forbidden_chars = [('/', 'xa'), ('<', 'xb'), ('>', 'xc'), (':', 'xd'), ('"', 'xe'),
+                       ('\\', 'xg'), ('|', 'xh'), ('?', 'xi'), ('*', 'xj'), ('(', 'xk'),
+                       (')', 'xl'), ('.', 'xm'), (',', 'xn'), ("'", 'xo')]
+    # The old code doubled 'x' twice (once up front, once as the first entry of
+    # its replacement list), hence "flex" -> "flexxxx".
+    s = s.replace("x", "xx").replace("x", "xx")
     for forbidden, replacement in forbidden_chars:
-        description = description.replace(forbidden, replacement)
-    return description
+        s = s.replace(forbidden, replacement)
+    return s
+
+
+def resolve_named_path(base, config_name: str, suffix: str = ""):
+    """base / <readable name><suffix>, or the legacy-named path if only that exists
+    (outputs of runs made before the naming change)."""
+    from pathlib import Path
+    new = Path(base) / f"{make_str_filename_safe(config_name)}{suffix}"
+    old = Path(base) / f"{legacy_str_filename_safe(config_name)}{suffix}"
+    return old if (not new.exists() and old.exists()) else new
 
 
 class SelfDescripting:
@@ -96,33 +95,6 @@ class SelfDescripting:
 torch.serialization.add_safe_globals([SelfDescripting])
 
 
-def evaluate_model(model: nn.Module, dataloader: DataLoader, device: str) -> torch.Tensor:
-    """
-    Evaluates the model on the given dataloader and returns accuracy and F1 score.
-
-    from https://github.com/poojamangal15/Adaptive-Neural-Networks
-    """
-    all_preds = []
-    all_labels = []
-    # Move model to the correct device and ensure correct data type
-    model = model.to(device).to(torch.float32)
-    model.eval()
-
-    with torch.no_grad():
-        for images, labels in tqdm.tqdm(dataloader):
-            # Ensure images are on the same device and data type
-            images = images.to(device).to(torch.float32)
-            labels = labels.to(device)
-
-            outputs = model(images)  # Perform forward pass
-            preds = torch.argmax(outputs, dim=1)
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-
-    accuracy = accuracy_score(all_labels, all_preds)
-    return accuracy
-
-
 def count_parameters(model: nn.Module) -> int:
     """
     Counts the number of trainable parameters in the model.
@@ -151,150 +123,6 @@ def try_make_dir(path):
 
 def get_num_nodes():
     return int(os.environ.get("SLURM_NNODES", 1))
-
-
-def load_dummy_data(
-    num_classes: int = 1000,
-    num_train: int = 1024,
-    num_val: int = 512,
-    num_test: int = 512,
-    image_size: tuple[int, int, int] = (3, 224, 224),
-    batch_size: int = 512,
-):
-    """
-    Generates dummy data loaders mimicking ImageNet.
-    """
-
-    # Helper to create random tensors
-    def make_dataset(num_samples):
-        images = torch.randn(num_samples, *image_size)
-        labels = torch.randint(0, num_classes, (num_samples,))
-        return TensorDataset(images, labels)
-
-    train_dataset = make_dataset(num_train)
-    val_dataset = make_dataset(num_val)
-    test_dataset = make_dataset(num_test)
-
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
-
-    print(f"Dummy dataloaders created, BS:{batch_size}")
-    return train_loader, val_loader, test_loader
-
-IMAGENET_TRANSFORMS = [
-    Resize(256),
-    CenterCrop(224),
-    RandomHorizontalFlip(p=0.5),
-    RandAugment(num_ops=2, magnitude=9, interpolation=InterpolationMode.BILINEAR),
-    ColorJitter(0.4, 0.4, 0.4, 0.1),
-    ToTensor(),
-    ConvertImageDtype(torch.float),
-    Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
-]
-
-# ----- Mixup + CutMix -----
-mixup_fn = Mixup(
-    mixup_alpha=0.8,
-    cutmix_alpha=1.0,
-    cutmix_minmax=None,
-    prob=1.0,
-    switch_prob=0.5,  # probability to switch between mixup and cutmix
-    mode='batch',
-    label_smoothing=0.11,
-    num_classes=1000
-)
-
-mixup_fn_cifar100 = Mixup(
-    mixup_alpha=0.8,  # Mixup parameter
-    cutmix_alpha=1.0, # CutMix parameter
-    cutmix_minmax=None,
-    prob=1.0,         # apply either mixup or cutmix with 100% prob
-    switch_prob=0.5,  # 50% chance to switch between mixup/cutmix
-    mode='batch',
-    label_smoothing=0.1,
-    num_classes=100
-)
-
-def load_imagenet(data_dir=paths.IMAGENET_PATH, tmp_dir=paths.TMPDIR, batch_size=512):
-    train_transform = Compose(IMAGENET_TRANSFORMS)
-    test_transform = Compose([
-        Resize(256),
-        CenterCrop(224),
-        ToTensor(),
-        ConvertImageDtype(torch.float),
-        Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
-    ])
-
-    train_dataset = ImageFolder(data_dir / "train", transform=train_transform)
-    test_dataset = ImageFolder(data_dir / "val", transform=test_transform)
-
-    train_dataloader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=False, num_workers=16)
-    val_dataloader = DataLoader(
-        test_dataset, batch_size=batch_size, num_workers=16)
-    test_dataloader = DataLoader(
-        test_dataset, batch_size=batch_size, num_workers=16)
-
-    print(f"made dataloaders, BS:{batch_size}")
-    return train_dataloader, val_dataloader, test_dataloader
-
-
-
-def load_data(dataset, data_dir=paths.DATA_PATH, tmp_dir=paths.TMPDIR, resize=None, batch_size=64):
-    """
-    Loads data for CIFAR10 or CIFAR100
-
-    Inspired by code from https://github.com/poojamangal15/Adaptive-Neural-Networks
-    """
-    normalizers = {
-        CIFAR10: {'mean': [0.485, 0.456, 0.406],
-                  'std': [0.229, 0.224, 0.225], },
-        CIFAR100: {'mean': [0.5070, 0.4865, 0.4409],
-                   'std': [0.2673, 0.2564, 0.2761], }
-    }
-
-    train_transform = [
-        RandomHorizontalFlip(p=0.5),
-        RandomRotation(degrees=15),
-        ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-        ToTensor(),
-        Normalize(**normalizers[dataset])
-    ]
-
-    test_transform = [
-        ToTensor(),
-        Normalize(**normalizers[dataset])
-    ]
-
-    if resize:
-        test_transform.insert(0, Resize(resize))
-        train_transform.insert(0, Resize(resize))
-
-    test_transform = Compose(test_transform)
-    train_transform = Compose(train_transform)
-
-    if tmp_dir:
-        try_make_dir(data_dir)
-        try_make_dir(tmp_dir)
-        shutil.copytree(data_dir, tmp_dir, dirs_exist_ok=True)
-    train_dataset = dataset(
-        root=data_dir if tmp_dir is None else tmp_dir,
-        train=True, download=True, transform=train_transform)
-    test_dataset = dataset(
-        root=data_dir if tmp_dir is None else tmp_dir,
-        train=False, download=True, transform=test_transform)
-    if tmp_dir is not None:
-        shutil.copytree(tmp_dir, data_dir, dirs_exist_ok=True)
-
-    train_dataloader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=False, num_workers=8)
-    val_dataloader = DataLoader(
-        test_dataset, batch_size=batch_size, num_workers=8)
-    test_dataloader = DataLoader(
-        test_dataset, batch_size=batch_size, num_workers=8)
-
-    return train_dataloader, val_dataloader, test_dataloader
 
 
 def load_wikitext(
@@ -510,7 +338,7 @@ def load_fineweb_edu_memmap(
     if not os.path.exists(meta_path):
         raise FileNotFoundError(
             f"No pre-tokenized FineWeb-Edu found at {data_dir}. Build it first:\n"
-            f"  sbatch prepare_fineweb.sh {tokenizer_name}\n"
+            f"  sbatch scripts/prepare_fineweb.sh {tokenizer_name}\n"
             f"or use the streaming pipeline instead (dataset='fineweb-edu')."
         )
     with open(meta_path) as f:
@@ -695,9 +523,8 @@ def save_statedict(name, model):
 
 
 def load_model(exp_name, model_config):
-    exp_name = make_str_filename_safe(exp_name)
     model = model_config.make_model()
-    with open(paths.TRAINED_MODELS / f"{exp_name}.pt", "rb") as f:
+    with open(resolve_named_path(paths.TRAINED_MODELS, exp_name, ".pt"), "rb") as f:
         sdict = torch.load(f)
         model.load_state_dict(sdict)
     return model
@@ -803,14 +630,18 @@ def load_llama_weights_into_flexllama(
     max_intermediate = list(cfg.intermediate_dims)[-1]
     max_num_heads    = list(cfg.num_heads)[-1]
     max_num_kv_heads = list(cfg.num_kv_heads)[-1]
-    head_dim         = max_hidden // max_num_heads
+    # FlexLLaMAConfig.head_dim is None for the original convention (hidden // heads)
+    # and set explicitly for checkpoints such as Qwen3-0.6B where they differ.
+    head_dim         = getattr(cfg, "head_dim", None) or max_hidden // max_num_heads
+    max_q_dim        = max_num_heads * head_dim
     max_kv_dim       = max_num_kv_heads * head_dim
 
     hf_head_dim = getattr(hf_config, "head_dim", None) or hf_config.hidden_size // hf_config.num_attention_heads
     if hf_head_dim != head_dim:
         raise ValueError(
-            f"head_dim mismatch: checkpoint={hf_head_dim}, model max level={head_dim} "
-            f"(hidden // heads). RoPEAttention assumes num_heads * head_dim == hidden."
+            f"head_dim mismatch: checkpoint={hf_head_dim}, model max level={head_dim}. "
+            f"Set FlexLLaMAConfig.head_dim (preset dims_spec['head_dim']) when the "
+            f"checkpoint's head_dim is not hidden // heads."
         )
     if (hf_config.model_type == "qwen3") != bool(getattr(cfg, "qk_norm", False)):
         raise ValueError(
@@ -864,14 +695,17 @@ def load_llama_weights_into_flexllama(
         block.input_layernorm.load_from_base(tmp_rms)
 
         # Attention projections, [out, in] layout, no transpose needed.
-        # q_proj/o_proj are always hidden->hidden; k_proj/v_proj output kv_dim,
-        # which is smaller than hidden when the checkpoint uses GQA. q/k/v carry
-        # bias on Qwen2-family checkpoints (cfg.qkv_bias); o_proj never does.
-        for proj, out_dim, has_bias in (
-            ("q_proj", max_hidden, cfg.qkv_bias), ("k_proj", max_kv_dim, cfg.qkv_bias),
-            ("v_proj", max_kv_dim, cfg.qkv_bias), ("o_proj", max_hidden, False),
+        # q_proj maps hidden -> num_heads * head_dim and o_proj the reverse (both
+        # hidden -> hidden under the original convention); k_proj/v_proj output
+        # kv_dim, smaller than q_dim under GQA. q/k/v carry bias on Qwen2-family
+        # checkpoints (cfg.qkv_bias); o_proj never does.
+        for proj, in_dim, out_dim, has_bias in (
+            ("q_proj", max_hidden, max_q_dim, cfg.qkv_bias),
+            ("k_proj", max_hidden, max_kv_dim, cfg.qkv_bias),
+            ("v_proj", max_hidden, max_kv_dim, cfg.qkv_bias),
+            ("o_proj", max_q_dim, max_hidden, False),
         ):
-            tmp_linear = nn.Linear(max_hidden, out_dim, bias=has_bias)
+            tmp_linear = nn.Linear(in_dim, out_dim, bias=has_bias)
             tmp_linear.weight.data.copy_(sd[f"{pfx}.self_attn.{proj}.weight"])
             if has_bias:
                 tmp_linear.bias.data.copy_(sd[f"{pfx}.self_attn.{proj}.bias"])

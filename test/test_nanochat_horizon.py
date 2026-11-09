@@ -60,6 +60,6 @@ print("\n=== prepare commands for the nanochat recipe ===")
 for name, sp, h8, h12 in rows:
     hf = TEACHER_PRESETS[name]["hf_model"]
     budget = min(h12, SAMPLE_10BT_TOKENS)
-    print(f"  sbatch prepare_fineweb.sh {hf} {budget:.3e}")
+    print(f"  sbatch scripts/prepare_fineweb.sh {hf} {budget:.3e}")
 
 print("\nDONE")

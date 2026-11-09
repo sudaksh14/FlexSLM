@@ -8,7 +8,6 @@ from flex_modules.module import Module
 import flex_modules as fm
 import utils
 
-from networks import flexvgg, flexvit, flexresnet, vgg, vit, resnet
 
 
 torch.manual_seed(seed=0)
@@ -159,24 +158,6 @@ def make_randomized_f(factor):
     return make_randomized
 
 
-class TestConv2d(LayerTester, unittest.TestCase):
-    IN_CHANNELS = [5, 9, 12]
-    OUT_CHANNELS = [5, 9, 12]
-
-    @make_randomized
-    def make_flex_module(self) -> Module:
-        return fm.conv2d.Conv2d(
-            self.IN_CHANNELS, self.OUT_CHANNELS, kernel_size=3, bias=True)
-
-    @make_randomized
-    def make_reg_module(self, level) -> nn.Module:
-        return nn.Conv2d(
-            self.IN_CHANNELS[level], self.OUT_CHANNELS[level], kernel_size=3, bias=True)
-
-    def make_input(self, level) -> torch.Tensor:
-        return torch.rand(10, self.IN_CHANNELS[level], 100, 100),
-
-
 class SelfAttention(nn.MultiheadAttention):
     def forward(self, x):
         return super().forward(x, x, x)[0]
@@ -266,92 +247,3 @@ class TestLinearSelect(LayerTester, unittest.TestCase):
         return torch.rand((10, 100, self.IN_SIZE[level])),
 
 
-class TestClassToken(LayerTester, unittest.TestCase):
-    TOKEN_SIZE = [25, 30, 56, 100]
-
-    @make_randomized
-    def make_flex_module(self):
-        return fm.ClassTokenLayer(self.TOKEN_SIZE)
-
-    @make_randomized
-    def make_reg_module(self, level):
-        return utils.ClassTokenLayer(self.TOKEN_SIZE[level])
-
-    def make_input(self, level):
-        return torch.rand(10, 100, self.TOKEN_SIZE[level]), 10
-
-
-class TestBatchnorm2d(LayerTester, unittest.TestCase):
-    CHANNELS = [5, 9, 12]
-
-    @make_randomized
-    def make_flex_module(self) -> Module:
-        return fm.BatchNorm2d(self.CHANNELS)
-
-    @make_randomized
-    def make_reg_module(self, level) -> nn.Module:
-        return nn.BatchNorm2d(self.CHANNELS[level])
-
-    def make_input(self, level) -> torch.Tensor:
-        return torch.rand(1, self.CHANNELS[level], 5, 5),
-
-
-class TestResnet(LayerTester, unittest.TestCase):
-    @staticmethod
-    def check_equiv(a, b):
-        if torch.isclose(a, b, rtol=1e-4).all():
-            return True
-        print(torch.isclose(a, b), file=sys.stderr)
-        print(torch.abs(a - b))
-        return False
-
-    @make_randomized
-    def make_flex_module(self) -> Module:
-        return flexresnet.ResnetConfig().make_model().to(utils.get_device())
-
-    @make_randomized
-    def make_reg_module(self, level) -> nn.Module:
-        return flexresnet.ResnetConfig().create_base_config(level).no_prebuilt().make_model().to(utils.get_device())
-
-    def make_input(self, level) -> torch.Tensor:
-        return torch.rand(1, 3, 32, 32).to(utils.get_device()),
-
-
-class TestVGG(LayerTester, unittest.TestCase):
-    @staticmethod
-    def check_equiv(a, b):
-        if torch.isclose(a, b, rtol=1e-4).all():
-            return True
-        print(torch.isclose(a, b), file=sys.stderr)
-        print(torch.abs(a - b))
-
-    @make_randomized_f(0.01)
-    def make_flex_module(self) -> Module:
-        return flexvgg.VGGConfig().make_model().to(utils.get_device())
-
-    @make_randomized_f(0.01)
-    def make_reg_module(self, level) -> nn.Module:
-        return flexvgg.VGGConfig().create_base_config(level).no_prebuilt().make_model().to(utils.get_device())
-
-    def make_input(self, level) -> torch.Tensor:
-        return torch.rand(1, 3, 32, 32).to(utils.get_device()),
-
-
-class TestViT(LayerTester, unittest.TestCase):
-    @staticmethod
-    def check_equiv(a, b):
-        if torch.isclose(a, b, rtol=1e-4).all():
-            return True
-        print(torch.isclose(a, b), file=sys.stderr)
-        print(torch.abs(a - b))
-
-    @make_randomized_f(0.01)
-    def make_flex_module(self) -> Module:
-        return flexvit.ViTConfig().make_model().to(utils.get_device())
-
-    @make_randomized_f(0.01)
-    def make_reg_module(self, level) -> nn.Module:
-        return flexvit.ViTConfig().create_base_config(level).no_prebuilt().make_model().to(utils.get_device())
-
-    def make_input(self, level) -> torch.Tensor:
-        return torch.rand(1, 3, 224, 224).to(utils.get_device()),

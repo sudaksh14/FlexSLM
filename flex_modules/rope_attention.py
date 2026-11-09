@@ -51,28 +51,38 @@ class RoPEAttention(nn.Module):
         qkv_bias: bool = False,
         qk_norm: bool = False,
         rms_norm_eps: float = 1e-6,
+        head_dim: int = None,
     ):
         super().__init__()
         hidden_dims = list(hidden_dims)
         num_heads = list(num_heads)
         num_kv_heads = list(num_kv_heads) if num_kv_heads is not None else list(num_heads)
         assert len(hidden_dims) == len(num_heads) == len(num_kv_heads)
-        assert all(h % n == 0 for h, n in zip(hidden_dims, num_heads))
+        if head_dim is None:
+            # Original convention: num_heads * head_dim == hidden on every level.
+            assert all(h % n == 0 for h, n in zip(hidden_dims, num_heads))
+            head_dims = [h // n for h, n in zip(hidden_dims, num_heads)]
+        else:
+            # Decoupled head size (e.g. Qwen3-0.6B): one fixed head_dim on every level.
+            head_dims = [head_dim] * len(hidden_dims)
         assert all(n % kv == 0 for n, kv in zip(num_heads, num_kv_heads))
 
         self.hidden_dims = hidden_dims
         self.num_heads_list = num_heads
         self.num_kv_heads_list = num_kv_heads
+        self.head_dims = head_dims
 
-        head_dims = [h // n for h, n in zip(hidden_dims, num_heads)]
+        q_dims = [n * hd for n, hd in zip(num_heads, head_dims)]
         kv_dims = [kv * hd for kv, hd in zip(num_kv_heads, head_dims)]
+        self.q_dims = q_dims
 
         # LLaMA convention: no bias anywhere. Qwen2 convention: q/k/v carry bias,
-        # o_proj does not - qkv_bias selects between the two.
-        self.q_proj = Linear(hidden_dims, hidden_dims, bias=qkv_bias)
+        # o_proj does not - qkv_bias selects between the two. Under the original
+        # convention q_dims == hidden_dims, i.e. the old hidden -> hidden maps.
+        self.q_proj = Linear(hidden_dims, q_dims, bias=qkv_bias)
         self.k_proj = Linear(hidden_dims, kv_dims, bias=qkv_bias)
         self.v_proj = Linear(hidden_dims, kv_dims, bias=qkv_bias)
-        self.o_proj = Linear(hidden_dims, hidden_dims, bias=False)
+        self.o_proj = Linear(q_dims, hidden_dims, bias=False)
 
         # Qwen3 convention: per-head RMSNorm on q and k before RoPE. The weights
         # have size head_dim, so they are shared by every level as long as all
@@ -85,7 +95,7 @@ class RoPEAttention(nn.Module):
 
         # Precompute RoPE cos/sin per level.
         for level in range(len(hidden_dims)):
-            head_dim = hidden_dims[level] // num_heads[level]
+            head_dim = head_dims[level]
             inv_freq = 1.0 / (
                 rope_theta ** (torch.arange(0, head_dim, 2).float() / head_dim)
             )
@@ -101,8 +111,8 @@ class RoPEAttention(nn.Module):
         level = self.q_proj.current_level()
         num_heads = self.num_heads_list[level]
         num_kv_heads = self.num_kv_heads_list[level]
-        hidden_dim = self.hidden_dims[level]
-        head_dim = hidden_dim // num_heads
+        head_dim = self.head_dims[level]
+        q_dim = self.q_dims[level]
 
         q = self.q_proj(x).view(B, S, num_heads, head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, S, num_kv_heads, head_dim).transpose(1, 2)
@@ -121,5 +131,5 @@ class RoPEAttention(nn.Module):
         v = _repeat_kv(v, n_rep)
 
         out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
-        out = out.transpose(1, 2).contiguous().view(B, S, hidden_dim)
+        out = out.transpose(1, 2).contiguous().view(B, S, q_dim)
         return self.o_proj(out)
