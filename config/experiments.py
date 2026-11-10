@@ -142,8 +142,11 @@ def _flex_llama_dims_fixed_head(hidden, heads, kv_heads, intermediate, head_dim,
             n = min(heads, max(ratio, round(heads * frac / ratio) * ratio))
             h = min(hidden, max(64, round(hidden * frac / 64) * 64))
             m = min(intermediate, max(64, round(intermediate * frac / 64) * 64))
-        if hs and n <= hs[-1]:
-            raise ValueError(f"fractions {fractions} give non-increasing head counts {hs + [n]}")
+        # Head counts come in steps of the GQA ratio (Qwen3-0.6B: 2, 4, ..., 16), so dense
+        # level grids (more than 5 levels in [0.5, 1]) repeat a head count; hidden and
+        # intermediate widths must still grow (checked below).
+        if hs and n < hs[-1]:
+            raise ValueError(f"fractions {fractions} give decreasing head counts {hs + [n]}")
         if hd and (h <= hd[-1] or m <= im[-1]):
             raise ValueError(f"fractions {fractions} give non-increasing widths")
         hs.append(n)

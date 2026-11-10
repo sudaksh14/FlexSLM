@@ -194,7 +194,7 @@ max_seq 3072):
 | B1 | Qwen3-0.6B conventional SFT + eval | config ready, not submitted |
 | B0 | Untrained Qwen3-0.6B / 1.7B eval | not submitted |
 | M1 | Importance ordering for Qwen3-0.6B: a Stage-1 pilot dimension (none / hidden_act / taylor); `FINAL_ORDERING` in `training/importance_order.py` set from the pilots | taylor checkpoint done (28100), hidden_act job 28106; job **28100** (28088/28091/28094 OOM: hook reference cycle kept every graph alive, fixed; 28097 ordered OK, max logit diff 1.65e-4, then crashed in the level-ppl check, fixed) |
-| M2 | Stage 1: nested KD recovery on PMC, teacher frozen Qwen3-1.7B | pilots `s1.qwen3_0p6b.pilot.{base,order_hidden_act,order_taylor,lr5e-5,lr2e-4,kd1,w_fixed,w_uncertainty,w_lossprop,w_dwa,single}` (20M tokens each, all ordered), final `s1.qwen3_0p6b.full` (100M, only after all hyperparameters incl. levels/sampling/lr/weighting are fixed from the pilots + Stage-2 ablations); PMC data done (1B train tokens, 28079); smoke 28101 |
+| M2 | Stage 1: nested KD recovery on PMC, teacher frozen Qwen3-1.7B | pilots `s1.qwen3_0p6b.pilot.{base,order_hidden_act,order_taylor,levels5,levels5_sw3,grid9_sw3,lr5e-5,lr2e-4,kd1,w_fixed,w_uncertainty,w_lossprop,w_dwa,single}` (20M tokens each, all ordered), final `s1.qwen3_0p6b.full` (100M, only after all hyperparameters incl. levels/sampling/lr/weighting are fixed from the pilots + Stage-2 ablations); PMC data done (1B train tokens, 28079); smoke 28101 |
 | M3 | Stage 2: nested SFT 0.6B, KD from T1 export | `sft.paper.qwen3_0p6b_nested` (loads `s1.qwen3_0p6b.full`); full SFT set always |
 | A1 | No importance ordering (if FINAL_ORDERING stays none: report the order_* pilots instead) | `s1.qwen3_0p6b.full.no_order` → `sft.paper.qwen3_0p6b_nested.no_order` |
 | A2 | No Stage 1 (start = FINAL_ORDERING checkpoint) | `sft.paper.qwen3_0p6b_nested.no_stage1` (smoke 28102) |
@@ -330,3 +330,23 @@ max_seq 3072):
   meta.json; 3.8 GiB total.
 - FaithMed checkpoints: not public (HF API search for faithmed / cxcscmu returns nothing; GitHub
   README only has training code and data-prep scripts, base model passed as a local path).
+- 28106 done: hidden_act ordering, untrained ppl L0/L1/L2 4,228 / 170 / 10.6 (none: 4,265 / 313).
+- T1 28083 slower with micro-batch 8: ~14 s/step vs ~9 s before (step 250 at 59 min), so ~4 h
+  total (limit 7 h).
+- Level count / continuum (user question): GQA (ratio 2) allows head counts 8, 10, ..., 16 in
+  [0.5, 1], i.e. at most 5 levels with distinct heads; `_flex_llama_dims_fixed_head` now allows
+  repeated head counts (hidden/FFN must still grow), so 7/9-level grids build. A true continuum
+  is not supported (flex modules slice by level index into fixed width lists); a dense grid +
+  sandwich sampling approximates it. RMSNorm is shared and sliced, so grids add no parameters.
+  New pilot arms: `levels5` (all 5 per step, ~1.5x step cost), `levels5_sw3` and `grid9_sw3`
+  (min + max + 1 random per step, ~1.0x). Compared at widths 0.5/0.75/1.0 (levels 0,2,4 / 0,4,8).
+- Bug fixed: sandwich sampling (`num_levels_per_step`) used an unseeded `random.sample`, so
+  DDP ranks could train different middle levels in one step; now seeded by (seed, step).
+  66 local tests pass.
+- Submitted 14 Stage-1 pilots, all afterok 28101 (Stage-1 smoke), --time 6 h (levels5 9 h, to
+  be tightened once 28101 reports tok/s): base 28107, order_hidden_act 28108, order_taylor 28109,
+  lr5e-5 28110, lr2e-4 28111, kd1 28112, w_fixed 28113, w_uncertainty 28114, w_lossprop 28115,
+  w_dwa 28116, single 28117, levels5 28118, levels5_sw3 28119, grid9_sw3 28120. node205 runs
+  them one after another (behind T1 28083 and 28101).
+- Pilot scale: stay on 0.6B (main backbone; a 1.7B pilot needs a >1.7B teacher, still on hold,
+  and ~3x the compute). Re-check only lr (+ the winning recipe vs base) at 1.7B later.

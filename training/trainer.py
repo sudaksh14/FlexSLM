@@ -241,7 +241,11 @@ class FlexLMTrainer(FlexModelTrainer):
         required = {all_levels[0], all_levels[-1]}
         pool = [l for l in all_levels if l not in required]
         num_extra = max(0, num_sample - len(required))
-        extra = random.sample(pool, k=min(num_extra, len(pool)))
+        # Seeded by (seed, step) like "single": every DDP rank trains the same levels
+        # (an unseeded draw let ranks pick different middle levels in the same step).
+        seed = getattr(self.training_context, "seed", 0)
+        rng = random.Random(seed * 1_000_003 + self.global_step)
+        extra = rng.sample(pool, k=min(num_extra, len(pool)))
         return sorted(required | set(extra))
 
     def _step(self, batch: tuple[torch.Tensor, torch.Tensor], stage: str) -> None:

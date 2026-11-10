@@ -271,9 +271,10 @@ def test_stage1_and_stage2_configs_register():
         c = b.training_context
         assert c.train_tokens == S1_PILOT_TOKENS and c.teacher_hf_model == "Qwen/Qwen3-1.7B"
         for k, v in overrides.items():
-            if k != "ordering":  # model-side (start weights), checked below
+            if k not in ("ordering", "fractions"):  # model-side, checked below
                 assert getattr(c, k) == v, (arm, k)
-        assert list(b.model_config.hidden_dims) == [512, 768, 1024]
+        if "fractions" not in overrides:
+            assert list(b.model_config.hidden_dims) == [512, 768, 1024]
     assert resolve_from_str("flexllama,s1.qwen3_0p6b.full").training_context.train_tokens == S1_FULL_TOKENS
 
     expect = {"": "none", ".w_fixed": "fixed", ".w_uncertainty": "uncertainty",
@@ -348,3 +349,26 @@ def test_stage1_micro_batches_match_one_pass(micro):
         torch.testing.assert_close(g[n], g_ref[n], rtol=1e-4, atol=1e-6)
     for k, v in ref_log.items():
         assert log[k] == pytest.approx(v, rel=1e-5, abs=1e-7), k
+
+
+def test_level_count_pilots_and_seeded_sandwich():
+    from training.run_experiment import resolve_from_str
+    from training.stage1 import FRACTIONS_9
+    b5 = resolve_from_str("flexllama,s1.qwen3_0p6b.pilot.levels5")
+    assert list(b5.model_config.hidden_dims) == [512, 640, 768, 896, 1024]
+    assert list(b5.model_config.num_heads) == [8, 10, 12, 14, 16]
+    g9 = resolve_from_str("flexllama,s1.qwen3_0p6b.pilot.grid9_sw3")
+    hd = list(g9.model_config.hidden_dims)
+    assert len(hd) == len(FRACTIONS_9) == 9 and hd[0] == 512 and hd[4] == 768 and hd[8] == 1024
+    assert g9.training_context.num_levels_per_step == 3
+    # Sandwich draws are a function of (seed, step) only: identical on every DDP rank.
+    t, _ = _kd_trainer("none", num_levels_per_step=3)
+    t.submodel.max_level = lambda: 8
+    draws = []
+    for step in range(20):
+        t._global_step_override = step
+        type(t).global_step = property(lambda self: self._global_step_override)
+        a, b = t._select_levels("train"), t._select_levels("train")
+        assert a == b and a[0] == 0 and a[-1] == 8 and len(a) == 3
+        draws.append(a[1])
+    assert len(set(draws)) > 1

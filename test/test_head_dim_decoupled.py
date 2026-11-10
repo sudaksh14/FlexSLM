@@ -78,3 +78,11 @@ def test_original_convention_unchanged():
     # head_dim == hidden // heads and head_dim=None in the FlexLLaMA config (the
     # Qwen3-1.7B path used by the existing runs).
     _run(hidden=128, heads=4, kv=2, head_dim=32, inter=256, fractions=[0.5, 1.0], flex_head_dim=None)
+
+
+def test_dense_grid_with_repeated_head_counts():
+    # 4 levels over 8 heads / 4 KV groups: head counts repeat (4, 4, 6, 8) while
+    # hidden and intermediate widths grow; max level must still match HF.
+    dims = _run(hidden=512, heads=8, kv=4, head_dim=32, inter=1024,
+                fractions=(0.5, 0.625, 0.75, 1.0), flex_head_dim=32)
+    assert dims[1][0] == dims[1][1]

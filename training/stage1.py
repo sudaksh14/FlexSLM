@@ -159,6 +159,12 @@ class FlexLMStage1Trainer(MemOptFlexLMKDTrainer):
 
 torch.serialization.add_safe_globals([Stage1Context, FlexLMStage1Trainer, load_pmc_memmap])
 
+# 5 levels: one per head count in [8, 16] (GQA ratio 2); 9 levels: hidden/FFN every 1/16 of
+# the width, head counts repeat (8, 8, 10, 10, ..., 16). Sampling 3 per step over a dense grid
+# approximates training on a continuum of widths at the cost of the 3-level recipe.
+FRACTIONS_5 = (0.5, 0.625, 0.75, 0.875, 1.0)
+FRACTIONS_9 = tuple(0.5 + k / 16 for k in range(9))
+
 # (arm name, overrides of the base pilot recipe). Base: original weight order, lr 1e-4,
 # KD lambda 0.5, T 2, every level every step, equal weights, 20M tokens.
 S1_PILOT_ARMS = [
@@ -173,18 +179,23 @@ S1_PILOT_ARMS = [
     ("w_lossprop", dict(level_weighting="loss_proportional")),
     ("w_dwa", dict(level_weighting="dwa")),
     ("single", dict(level_sampling="single")),          # one random level per step
+    # Level count / dense grid. Every grid contains the paper's widths 0.5 / 0.75 / 1.0, so
+    # the arms are compared on those levels (5 levels: 0, 2, 4; 9 levels: 0, 4, 8).
+    ("levels5", dict(fractions=FRACTIONS_5)),                                   # all 5 per step
+    ("levels5_sw3", dict(fractions=FRACTIONS_5, num_levels_per_step=3)),        # min, max + 1 random
+    ("grid9_sw3", dict(fractions=FRACTIONS_9, num_levels_per_step=3)),          # dense grid, 3 per step
 ]
 
 
 def make_stage1(train_tokens: int, wandb_project_name: str, ordering: str = "none",
-                **overrides) -> TrainerBuilder:
+                fractions=(0.5, 0.75, 1.0), **overrides) -> TrainerBuilder:
     """Qwen3-0.6B with GQA-preserving levels at hidden fractions 0.5 / 0.75 / 1.0
     (the paper's three levels), KD from the frozen Qwen3-1.7B. ordering (M1, see
     training/importance_order.ORDERINGS) picks the warm-start checkpoint: "none" is
     Hugging Face Qwen3-0.6B, the others the checkpoints importance_order.py writes."""
     from config.experiments import make_flexllama_warmstart_kd
     from training.importance_order import start_weights
-    model_config = make_flexllama_warmstart_kd("qwen3-0.6b", fractions=(0.5, 0.75, 1.0)).model_config
+    model_config = make_flexllama_warmstart_kd("qwen3-0.6b", fractions=tuple(fractions)).model_config
     model_config = dataclasses.replace(model_config, pretrained_hf_model=start_weights(ordering))
     kwargs = dict(train_tokens=train_tokens, gradient_clip_val=1.0, seed=0,
                   wandb_project_name=wandb_project_name)
