@@ -26,6 +26,9 @@ from torch.utils.data import DataLoader, Dataset
 import config.paths as paths
 import utils
 from training import FlexLMKDTrainer, FlexTrainingContext, TrainerBuilder
+from training.importance_order import FINAL_ORDERING, start_weights
+from training.trainer import check_level_sampling, warmup_cosine_scheduler
+from training.level_weights import LevelWeightingMixin, check_args as check_level_weighting
 
 IGNORE_INDEX = -100
 SFT_DATA_DIR = os.path.join("data", "medqa_sft")
@@ -43,9 +46,17 @@ _QWEN3_FAITHMED = dict(
 # Trainer / LLaMA-Factory default that FaithMed's recipe runs with; the runs
 # above did not clip) and one fixed seed. The effective batch is 32 sequences,
 # i.e. batch_size x number of GPUs: 16 x 2 on node205 (2x A40).
-_PAPER = dict(_QWEN3_FAITHMED, batch_size=16, gradient_clip_val=1.0, seed=0)
+# micro_batch_size 8: job 28075 (1.7B, 16 x 3,072 per GPU in one pass) ran out of
+# memory at step 731 (43.5 GB of 44.7 GB on an A40); two passes of 8 give the same step.
+_PAPER = dict(_QWEN3_FAITHMED, batch_size=16, micro_batch_size=8, gradient_clip_val=1.0, seed=0)
 _FT_TEACHER_1P7B = os.path.join(
     "hf_export", utils.make_str_filename_safe("flexllama,sft.paper.qwen3_1p7b_teacher"), "level2")
+# Stage 2 (nested SFT of Qwen3-0.6B): the paper schedule, KD (lambda 0.5, T 2)
+# from the fine-tuned 1.7B, all levels every step. hf_preset None: the model and
+# its start weights come from the Stage-1 config named in SFT_RUNS.
+_S2 = dict(_PAPER, hf_preset=None, teacher_hf_model=_FT_TEACHER_1P7B,
+           tokenizer_name="Qwen/Qwen3-0.6B", kd_lambda=0.5, kd_temperature=2.0,
+           num_levels_per_step=None)
 
 # (new config name, config it starts from, overrides). A start config of None
 # warm-starts from Hugging Face weights instead (see _hf_base).
@@ -89,6 +100,46 @@ SFT_RUNS = [
         hf_preset="qwen3-0.6b", kd_lambda=0.0, train_levels=[2],
         level_fractions=(0.5, 0.75, 1.0),
         wandb_project_name="MedNest_qwen3_0p6b_conventional")),
+    # M3, Stage 2: nested SFT of Qwen3-0.6B (all levels every step) starting from
+    # the Stage-1 result, KD from the fine-tuned 1.7B (T1 export). The variants
+    # below change one thing each and are always full runs (the whole SFT set).
+    ("sft.paper.qwen3_0p6b_nested", "s1.qwen3_0p6b.full", dict(_S2,
+        wandb_project_name="MedNest_s2_nested")),
+    # A4: level weighting, 5-way with the equal-weight M3 run above.
+    ("sft.paper.qwen3_0p6b_nested.w_fixed", "s1.qwen3_0p6b.full", dict(_S2,
+        level_weighting="fixed", level_weights_fixed=(3.0, 1.0, 1.0),
+        wandb_project_name="MedNest_s2_w_fixed")),
+    ("sft.paper.qwen3_0p6b_nested.w_uncertainty", "s1.qwen3_0p6b.full", dict(_S2,
+        level_weighting="uncertainty", wandb_project_name="MedNest_s2_w_uncertainty")),
+    ("sft.paper.qwen3_0p6b_nested.w_lossprop", "s1.qwen3_0p6b.full", dict(_S2,
+        level_weighting="loss_proportional", wandb_project_name="MedNest_s2_w_lossprop")),
+    ("sft.paper.qwen3_0p6b_nested.w_dwa", "s1.qwen3_0p6b.full", dict(_S2,
+        level_weighting="dwa", wandb_project_name="MedNest_s2_w_dwa")),
+    # A5: one uniformly random level per step (MatFormer) instead of all levels.
+    ("sft.paper.qwen3_0p6b_nested.single", "s1.qwen3_0p6b.full", dict(_S2,
+        level_sampling="single", wandb_project_name="MedNest_s2_single")),
+    # A2: no Stage 1 (warm start straight from Qwen3-0.6B with the final recipe's ordering).
+    ("sft.paper.qwen3_0p6b_nested.no_stage1", None, dict(_S2,
+        hf_preset="qwen3-0.6b", level_fractions=(0.5, 0.75, 1.0), hf_start=start_weights(FINAL_ORDERING),
+        wandb_project_name="MedNest_s2_no_stage1")),
+    # A1: no importance ordering (Stage 1 and Stage 2 both without it).
+    ("sft.paper.qwen3_0p6b_nested.no_order", "s1.qwen3_0p6b.full.no_order", dict(_S2,
+        wandb_project_name="MedNest_s2_no_order")),
+    # A3: no KD in Stage 2 (CE on the answers only).
+    ("sft.paper.qwen3_0p6b_nested.no_kd", "s1.qwen3_0p6b.full", dict(_S2,
+        kd_lambda=0.0, wandb_project_name="MedNest_s2_no_kd")),
+    # Baseline B2: MatFormer-style nested fine-tuning of the same three levels: one
+    # uniformly random level per step, CE only, no ordering, no Stage 1, no KD.
+    # (MatFormer nests only the FFN, which cannot reach a 0.19B level of Qwen3-0.6B.)
+    ("sft.paper.qwen3_0p6b_matformer", None, dict(_PAPER,
+        hf_preset="qwen3-0.6b", kd_lambda=0.0, level_fractions=(0.5, 0.75, 1.0),
+        level_sampling="single", wandb_project_name="MedNest_b2_matformer")),
+    # Development only (smoke tests of the level_weighting flag, not a paper run):
+    # nested SFT of Qwen3-0.6B, every level, no KD, no importance ordering.
+    ("sft.dev.qwen3_0p6b_nested_uncertainty", None, dict(_PAPER,
+        hf_preset="qwen3-0.6b", kd_lambda=0.0, level_fractions=(0.5, 0.75, 1.0),
+        level_weighting="uncertainty",
+        wandb_project_name="MedNest_dev_level_weighting")),
 ]
 
 
@@ -167,12 +218,29 @@ class SFTTrainingContext(FlexTrainingContext):
     warmup_ratio: float = None
     activation_checkpointing: bool = False
     train_levels: list = None
+    # Per-level loss weights (training/level_weights.py, which documents them):
+    # "none" | "fixed" | "uncertainty" (NSN / Kendall) | "loss_proportional" | "dwa".
+    level_weighting: str = "none"
+    level_weight_lr: float = 1e-2     # uncertainty: Adam lr of the log-variances
+    level_weight_ema: float = 0.9     # loss_proportional, dwa: loss EMA decay
+    level_weights_fixed: tuple = None # fixed: one weight per level, smallest first
+    dwa_window: int = 50
+    dwa_temperature: float = 2.0
+    # "sandwich" (default: every level, or num_levels_per_step with min and max
+    # always in) | "single" (one uniformly random level per step, MatFormer-style).
+    level_sampling: str = "sandwich"
+    # Sequences per forward/backward pass inside one optimizer step (None = whole
+    # batch). Exact: losses are normalised over the whole batch.
+    micro_batch_size: int = None
 
     def __init__(self, load_from: str, teacher_hf_model: str, tokenizer_name: str,
                  kd_lambda=0.5, kd_temperature=2.0, num_levels_per_step=None,
                  lr=2e-5, weight_decay=0.0, epochs=3, patience=5,
                  batch_size=16, max_seq_length=1024, data_dir=SFT_DATA_DIR,
-                 warmup_ratio=None, activation_checkpointing=False, train_levels=None, **kwargs):
+                 warmup_ratio=None, activation_checkpointing=False, train_levels=None,
+                 level_weighting="none", level_weight_lr=1e-2, level_weight_ema=0.9,
+                 level_weights_fixed=None, dwa_window=50, dwa_temperature=2.0,
+                 level_sampling="sandwich", micro_batch_size=None, **kwargs):
         loader = functools.partial(load_qa_sft, data_dir=data_dir, tokenizer_name=tokenizer_name,
                                    batch_size=batch_size, max_seq_length=max_seq_length)
         FlexTrainingContext.__init__(self, loader, patience=patience, epochs=epochs,
@@ -186,6 +254,19 @@ class SFTTrainingContext(FlexTrainingContext):
         self.warmup_ratio = warmup_ratio
         self.activation_checkpointing = activation_checkpointing
         self.train_levels = train_levels
+        check_level_weighting(level_weighting, level_weight_lr, level_weight_ema,
+                              level_weights_fixed, dwa_window, dwa_temperature)
+        check_level_sampling(level_sampling)
+        self.level_weighting = level_weighting
+        self.level_weight_lr = level_weight_lr
+        self.level_weight_ema = level_weight_ema
+        self.level_weights_fixed = tuple(level_weights_fixed) if level_weights_fixed else None
+        self.dwa_window = dwa_window
+        self.dwa_temperature = dwa_temperature
+        self.level_sampling = level_sampling
+        if micro_batch_size is not None and (int(micro_batch_size) != micro_batch_size or micro_batch_size < 1):
+            raise ValueError(f"micro_batch_size must be a positive integer, got {micro_batch_size!r}")
+        self.micro_batch_size = micro_batch_size
 
     def make_optimizer(self, model):
         return optim.AdamW(model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
@@ -198,27 +279,21 @@ class SFTTrainingContext(FlexTrainingContext):
         """Linear warmup over the first warmup_ratio of the steps, then cosine to 0,
         stepped after every optimizer step: the schedule HF Trainer (and so
         LLaMA-Factory) uses for lr_scheduler_type=cosine with warmup_ratio."""
-        warmup = math.ceil(self.warmup_ratio * total_steps)
-
-        def factor(step):
-            if step < warmup:
-                return step / max(1, warmup)
-            progress = (step - warmup) / max(1, total_steps - warmup)
-            return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
-
-        return LambdaLR(optimizer, factor)
+        return warmup_cosine_scheduler(optimizer, total_steps, self.warmup_ratio)
 
 
 def trained_model_path(config_name: str):
     return utils.resolve_named_path(paths.TRAINED_MODELS, config_name, ".pt")
 
 
-class FlexLMSFTTrainer(FlexLMKDTrainer):
+class FlexLMSFTTrainer(LevelWeightingMixin, FlexLMKDTrainer):
     """FlexLMKDTrainer for question/answer data. The KD term is FlexSLM's own: over
     every real token, as in FlexLMKDTrainer, with the same lambda and T. Only CE is
     restricted to the answer tokens, the SFT convention (FaithMed's
     train_on_prompt: false). The loss is evaluated in row chunks into a detached
-    proxy of the logits, as in training_memopt, so a 152k vocab fits in memory."""
+    proxy of the logits, as in training_memopt, so a 152k vocab fits in memory.
+    With level_weighting set, each level's training loss is scaled by its weight
+    (training/level_weights.py); logged losses and val_loss stay unweighted."""
 
     def handle_load_from(self):
         if self.training_context.load_from is None:
@@ -280,7 +355,8 @@ class FlexLMSFTTrainer(FlexLMKDTrainer):
         # Prediction positions: every real next token for KD (FlexLMKDTrainer's
         # positions, minus padding); with no KD, only the answer tokens CE uses.
         rows = real[:, 1:] if kd_lambda > 0 else answer
-        row_targets = targets[rows]      # IGNORE_INDEX on prompt rows: CE skips them
+        # Normalisers over the whole batch, so micro-batches sum to the same loss
+        # (and the same gradient) as one pass over the batch.
         n_ce = int(answer.sum())
         n_kd = int(rows.sum())
 
@@ -288,65 +364,80 @@ class FlexLMSFTTrainer(FlexLMKDTrainer):
             opt = self.optimizers()
             opt.zero_grad()
 
-        teacher_rows = None
-        if kd_lambda > 0:
-            with torch.no_grad():
-                teacher_rows = self._teacher.model(input_ids).last_hidden_state[:, :-1][rows]
+        levels = self._select_levels(stage)
+        # Weight of each level's loss in the backward pass only (1.0 when off).
+        weights = {i: self._level_weight(i, training) for i in levels}
+        zero = torch.zeros((), device=input_ids.device)
+        ce_loss = {i: zero for i in levels}
+        kl_loss = {i: zero for i in levels}
+        correct = {i: 0 for i in levels}
+
+        # micro_batch_size splits the batch by sequence: the [N, V] logits and their
+        # gradient (about 30 GB for 16 x 3,072 tokens and Qwen3's 151,936-token vocab)
+        # only exist for one micro-batch at a time.
+        bsz = input_ids.shape[0]
+        mb = getattr(self.training_context, "micro_batch_size", None) or bsz
+        for lo in range(0, bsz, mb):
+            mb_ids, mb_rows = input_ids[lo:lo + mb], rows[lo:lo + mb]
+            row_targets = targets[lo:lo + mb][mb_rows]   # IGNORE_INDEX on prompt rows: CE skips them
+            n_rows = int(mb_rows.sum())
+            if n_rows == 0:
+                continue
+            teacher_rows = None
+            if kd_lambda > 0:
+                with torch.no_grad():
+                    teacher_rows = self._teacher.model(mb_ids).last_hidden_state[:, :-1][mb_rows]
+
+            for i in levels:
+                self.submodel.set_level_use(i)
+                logits = self.submodel.lm_head(self._hidden_rows(mb_ids, mb_rows))  # [N, V]
+                proxy = logits.detach().requires_grad_(True) if training else logits
+                w = weights[i]
+                for start in range(0, n_rows, chunk):
+                    end = min(start + chunk, n_rows)
+                    s = proxy[start:end].float()
+                    t = row_targets[start:end]
+                    # sum / N reproduces the mean over the answer tokens (CE) and
+                    # kl_div(reduction='batchmean') over the real tokens (KD).
+                    ce_chunk = F.cross_entropy(s, t, ignore_index=IGNORE_INDEX, reduction="sum") / n_ce
+                    loss_chunk = (1 - kd_lambda) * ce_chunk
+                    if teacher_rows is not None:
+                        with torch.no_grad():
+                            teacher = self._teacher.lm_head(teacher_rows[start:end]).float()
+                        kl_chunk = F.kl_div(F.log_softmax(s / T, dim=-1), F.softmax(teacher / T, dim=-1),
+                                            reduction="sum") / n_kd * (T ** 2)
+                        loss_chunk = loss_chunk + kd_lambda * kl_chunk
+                        kl_loss[i] = kl_loss[i] + kl_chunk.detach()
+                    if training:
+                        (loss_chunk * w if w != 1.0 else loss_chunk).backward()
+                    ce_loss[i] = ce_loss[i] + ce_chunk.detach()
+                    on_answer = t != IGNORE_INDEX
+                    correct[i] += int((s.detach().argmax(-1)[on_answer] == t[on_answer]).sum())
+
+                if training and proxy.grad is not None:
+                    self.manual_backward(logits, gradient=proxy.grad)
+                del logits, proxy
 
         total_loss = 0.0
-        for i in self._select_levels(stage):
-            self.submodel.set_level_use(i)
-            logits = self.submodel.lm_head(self._hidden_rows(input_ids, rows))  # [N, V]
-            proxy = logits.detach().requires_grad_(True) if training else logits
-
-            ce_loss = kl_loss = 0.0
-            correct = 0
-            for start in range(0, n_kd, chunk):
-                end = min(start + chunk, n_kd)
-                s = proxy[start:end].float()
-                t = row_targets[start:end]
-                # sum / N reproduces the mean over the answer tokens (CE) and
-                # kl_div(reduction='batchmean') over the real tokens (KD).
-                ce_chunk = F.cross_entropy(s, t, ignore_index=IGNORE_INDEX, reduction="sum") / n_ce
-                loss_chunk = (1 - kd_lambda) * ce_chunk
-                if teacher_rows is not None:
-                    with torch.no_grad():
-                        teacher = self._teacher.lm_head(teacher_rows[start:end]).float()
-                    kl_chunk = F.kl_div(F.log_softmax(s / T, dim=-1), F.softmax(teacher / T, dim=-1),
-                                        reduction="sum") / n_kd * (T ** 2)
-                    loss_chunk = loss_chunk + kd_lambda * kl_chunk
-                    kl_loss = kl_loss + kl_chunk.detach()
-                if training:
-                    loss_chunk.backward()
-                ce_loss = ce_loss + ce_chunk.detach()
-                on_answer = t != IGNORE_INDEX
-                correct += int((s.detach().argmax(-1)[on_answer] == t[on_answer]).sum())
-
-            if training and proxy.grad is not None:
-                self.manual_backward(logits, gradient=proxy.grad)
-
-            kl_loss = kl_loss if torch.is_tensor(kl_loss) else torch.zeros((), device=input_ids.device)
-            loss = (1 - kd_lambda) * ce_loss + kd_lambda * kl_loss
+        for i in levels:
+            loss = (1 - kd_lambda) * ce_loss[i] + kd_lambda * kl_loss[i]
             self.log(f"{stage}_level{i}_loss", loss, prog_bar=False, sync_dist=True)
-            self.log(f"{stage}_level{i}_ce_loss", ce_loss, prog_bar=False, sync_dist=True)
-            self.log(f"{stage}_level{i}_kl_loss", kl_loss, prog_bar=False, sync_dist=True)
-            self.log(f"{stage}_level{i}_answer_token_acc", correct / max(1, n_ce),
+            self.log(f"{stage}_level{i}_ce_loss", ce_loss[i], prog_bar=False, sync_dist=True)
+            self.log(f"{stage}_level{i}_kl_loss", kl_loss[i], prog_bar=False, sync_dist=True)
+            self.log(f"{stage}_level{i}_answer_token_acc", correct[i] / max(1, n_ce),
                      prog_bar=(stage != "train"), sync_dist=True)
+            self._record_level(i, loss, weights[i], training)
             total_loss += loss
 
         self.log(f"{stage}_loss", total_loss, prog_bar=(stage != "train"), sync_dist=True)
 
         if training:
+            self._finish_level_weights(training, input_ids.device)
             self._optimizer_step(opt)
             if self.training_context.warmup_ratio is not None:
                 self.lr_schedulers().step()
-            # Per-rank progress in the .out log (the progress bar only appears at the
-            # end): a rank that stops printing is the one stuck in a collective.
-            step = self.global_step
-            if step < 20 or step % 50 == 0:
-                mem = torch.cuda.max_memory_allocated() / 2**30 if torch.cuda.is_available() else 0.0
-                print(f"[sft] rank {self.global_rank} step {step} kd_rows {n_kd} answer_rows {n_ce} "
-                      f"max_mem {mem:.1f}GB", flush=True)
+            # tok/s counts every real (prompt + answer) token of this rank's batch.
+            self._report_progress("sft", int(real.sum()), kd_rows=n_kd, answer_rows=n_ce)
 
 
 torch.serialization.add_safe_globals([SFTTrainingContext, FlexLMSFTTrainer, load_qa_sft])
@@ -384,13 +475,16 @@ def make_sft(base_name: str, base: TrainerBuilder, **overrides) -> TrainerBuilde
     return TrainerBuilder(FlexLMSFTTrainer, model_config, SFTTrainingContext(**kwargs))
 
 
-def _hf_base(preset: str, fractions=None) -> TrainerBuilder:
+def _hf_base(preset: str, fractions=None, hf_start=None) -> TrainerBuilder:
     """A FlexLLaMA whose max level is the Hugging Face model `preset`, warm-started
     from its weights and distilled from it (the TEACHER_PRESETS warm-start setup).
     config.experiments is still importing when this runs, but the function used
     here is defined before register_sft_configs is called."""
     from config.experiments import make_flexllama_warmstart_kd
-    return make_flexllama_warmstart_kd(preset, kd_lambda=0.5, kd_temperature=2.0, fractions=fractions)
+    builder = make_flexllama_warmstart_kd(preset, kd_lambda=0.5, kd_temperature=2.0, fractions=fractions)
+    if hf_start is not None:  # same architecture, other start weights (e.g. importance-ordered)
+        builder.model_config = dataclasses.replace(builder.model_config, pretrained_hf_model=hf_start)
+    return builder
 
 
 def register_sft_configs(configs: dict) -> None:
@@ -400,7 +494,8 @@ def register_sft_configs(configs: dict) -> None:
         overrides = dict(overrides)
         preset = overrides.pop("hf_preset", None)
         fractions = overrides.pop("level_fractions", None)
-        base = _hf_base(preset, fractions) if preset else configs.get("flexllama", {}).get(base_name)
+        hf_start = overrides.pop("hf_start", None)
+        base = _hf_base(preset, fractions, hf_start) if preset else configs.get("flexllama", {}).get(base_name)
         if base is None:
             logging.warning(f"SFT: base config flexllama,{base_name} not found, skipping {name}")
             continue
@@ -424,6 +519,8 @@ def check(only: str = None) -> None:
         print(f"teacher            : {ctx.teacher_hf_model}")
         print(f"kd_lambda / T      : {ctx.kd_lambda} / {ctx.kd_temperature}")
         print(f"levels per step    : {ctx.num_levels_per_step or 'all'}")
+        print(f"level weighting    : {getattr(ctx, 'level_weighting', 'none')}  "
+              f"fixed {getattr(ctx, 'level_weights_fixed', None)}  sampling {getattr(ctx, 'level_sampling', 'sandwich')}")
         print(f"lr / epochs        : {ctx.lr} / {ctx.epochs}  warmup_ratio {ctx.warmup_ratio}  "
               f"train_levels {getattr(ctx, 'train_levels', None) or 'all'}")
         print(f"hidden dims        : {list(cfg.hidden_dims)}  heads {list(cfg.num_heads)}  "

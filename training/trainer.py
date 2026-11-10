@@ -2,6 +2,7 @@ from typing import Callable, Optional
 import dataclasses
 import os
 import datetime
+import inspect
 import logging
 import random
 
@@ -188,6 +189,31 @@ class FlexModelTrainer(pl.LightningModule, BaseTrainer):
         return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "monitor": "val_loss"}}
 
 
+LEVEL_SAMPLING = ("sandwich", "single")
+
+
+def check_level_sampling(level_sampling: str) -> None:
+    if level_sampling not in LEVEL_SAMPLING:
+        raise ValueError(f"level_sampling must be one of {LEVEL_SAMPLING}, got {level_sampling!r}")
+
+
+def warmup_cosine_scheduler(optimizer, total_steps: int, warmup_ratio: float):
+    """Linear warmup over the first warmup_ratio of the steps, then cosine to 0,
+    stepped after every optimizer step: the schedule HF Trainer (and so
+    LLaMA-Factory) uses for lr_scheduler_type=cosine with warmup_ratio."""
+    import math
+    from torch.optim.lr_scheduler import LambdaLR
+    warmup = math.ceil(warmup_ratio * total_steps)
+
+    def factor(step):
+        if step < warmup:
+            return step / max(1, warmup)
+        progress = (step - warmup) / max(1, total_steps - warmup)
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+
+    return LambdaLR(optimizer, factor)
+
+
 class FlexLMTrainer(FlexModelTrainer):
     """
     Trainer function for FlexSLM models without KD
@@ -203,6 +229,11 @@ class FlexLMTrainer(FlexModelTrainer):
         (or unset) trains every level, same as looping over all of them.
         """
         all_levels = list(range(self.submodel.max_level() + 1))
+        if stage == "train" and getattr(self.training_context, "level_sampling", "sandwich") == "single":
+            # One level per step, uniformly (MatFormer). Seeded by (seed, step), so
+            # every DDP rank draws the same level and a resumed run replays it.
+            seed = getattr(self.training_context, "seed", 0)
+            return [random.Random(seed * 1_000_003 + self.global_step).choice(all_levels)]
         num_sample = getattr(self.training_context, "num_levels_per_step", None)
         if stage != "train" or num_sample is None or num_sample >= len(all_levels):
             return all_levels
@@ -268,7 +299,7 @@ class FlexLMKDTrainer(FlexLMTrainer):
         teacher_name = getattr(self.training_context, 'teacher_hf_model', None) or 'gpt2'
         # bfloat16: teacher is frozen/eval-only, no need for the fp32 default's
         # memory cost (halves weight memory, e.g. ~6.2GB->~3.1GB for a 1.5B teacher).
-        teacher = AutoModelForCausalLM.from_pretrained(teacher_name, dtype=torch.bfloat16)
+        teacher = AutoModelForCausalLM.from_pretrained(teacher_name, torch_dtype=torch.bfloat16)
         teacher.eval()
         for p in teacher.parameters():
             p.requires_grad_(False)
@@ -418,6 +449,15 @@ def _print_experiment_banner(conf_description, model_config, config, steps_per_e
     print("\n".join(lines), flush=True)
 
 
+
+def _weights_only_kwarg(fn) -> dict:
+    """{'weights_only': False} when the installed Lightning takes that argument.
+    Lightning >= 2.6 has it (and torch >= 2.6 would otherwise load checkpoints with
+    weights_only=True); 2.5.x (the DAS-6 env, 2.5.3) has no such parameter and
+    already loads with weights_only=False. On 2.5.x, load_from_checkpoint would
+    forward an unknown weights_only to the module's __init__ via **kwargs."""
+    return {"weights_only": False} if "weights_only" in inspect.signature(fn).parameters else {}
+
 def finetune(model: pl.LightningModule, config: TrainingContext, conf_description, model_config) -> pl.LightningModule:
     global logger
 
@@ -546,7 +586,7 @@ def finetune(model: pl.LightningModule, config: TrainingContext, conf_descriptio
     )
 
     try:
-        trainer.fit(model, train_loader, val_loader, ckpt_path=resume_from, weights_only=False)
+        trainer.fit(model, train_loader, val_loader, ckpt_path=resume_from, **_weights_only_kwarg(trainer.fit))
     except Exception as exc:
         # Training may have fully completed before a post-epoch callback (e.g.
         # scheduler step) raised.  Try to recover and permanently save the best
@@ -556,7 +596,7 @@ def finetune(model: pl.LightningModule, config: TrainingContext, conf_descriptio
             logging.warning(
                 f"trainer.fit() raised {exc!r}. Attempting recovery from {best_path}")
             try:
-                recovered = type(model).load_from_checkpoint(best_path, weights_only=False, map_location="cpu")
+                recovered = type(model).load_from_checkpoint(best_path, map_location="cpu", **_weights_only_kwarg(type(model).load_from_checkpoint))
                 utils.save_model(conf_description, recovered.submodel)
                 logging.warning("Recovery succeeded. Weights saved to permanent storage.")
             except Exception as rec_exc:
@@ -568,11 +608,13 @@ def finetune(model: pl.LightningModule, config: TrainingContext, conf_descriptio
     if utils.get_num_nodes() > 1:
         if trainer.is_global_zero:
             model = type(model).load_from_checkpoint(
-                checkpoint_callback.best_model_path, weights_only=False, map_location="cpu")
+                checkpoint_callback.best_model_path, map_location="cpu",
+                **_weights_only_kwarg(type(model).load_from_checkpoint))
             utils.save_model(conf_description, model.submodel)
     else:
         model = type(model).load_from_checkpoint(
-            checkpoint_callback.best_model_path, weights_only=False, map_location="cpu")
+            checkpoint_callback.best_model_path, map_location="cpu",
+                **_weights_only_kwarg(type(model).load_from_checkpoint))
         utils.save_model(conf_description, model.submodel)
 
     # Testing is informational, a failure here must not erase already-saved weights.

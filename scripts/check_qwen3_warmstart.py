@@ -31,7 +31,7 @@ def main():
     flex = cfg.make_model()
     utils.load_llama_weights_into_flexllama(flex, name)
     flex.eval().cuda()
-    hf = AutoModelForCausalLM.from_pretrained(name, dtype=torch.float32).eval().cuda()
+    hf = AutoModelForCausalLM.from_pretrained(name, torch_dtype=torch.float32).eval().cuda()
     tok = AutoTokenizer.from_pretrained(name)
 
     texts = ["Question: A 45-year-old man presents with crushing chest pain radiating to the left arm. "

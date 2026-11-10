@@ -1039,5 +1039,8 @@ CONFIGS['flexllama']['pmc.full5ep'].training_context.patience = 1000  # run all 
 CONFIGS['flexllama']['pmc.full5ep'].training_context.epochs = 5
 
 
+from training.stage1 import register_stage1_configs
+register_stage1_configs(CONFIGS)  # before SFT: the Stage-2 configs load the Stage-1 result
+
 from training.sft import register_sft_configs
 register_sft_configs(CONFIGS)

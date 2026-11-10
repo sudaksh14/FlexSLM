@@ -12,7 +12,7 @@
 # (GQA-preserving levels) warm starts must reproduce Hugging Face's logits.
 #   sbatch scripts/das6/gpu_tests.sbatch      (from ~/FlexSLM)
 source scripts/das6/common.sh gpu
-python -m pytest test/test_modules.py test/test_head_dim_decoupled.py test/test_memopt_equivalence.py -q -p no:cacheprovider
+python -m pytest test/test_level_weights.py test/test_importance_order.py test/test_modules.py test/test_head_dim_decoupled.py test/test_memopt_equivalence.py -q -p no:cacheprovider
 python -m scripts.check_qwen3_warmstart flexllama,sft.paper.qwen3_0p6b_conventional --no-export
 python -m scripts.check_qwen3_warmstart flexllama,sft.paper.qwen3_1p7b_teacher --no-export
 echo "[gpu_tests] ALL PASSED"

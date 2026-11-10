@@ -35,6 +35,7 @@ import torch
 import torch.nn.functional as F
 
 from training import FlexLMTrainer, FlexLMKDTrainer
+from training.level_weights import LevelWeightingMixin
 
 DEFAULT_LOSS_CHUNK_SIZE = 1024
 
@@ -160,8 +161,10 @@ class MemOptFlexLMTrainer(_MemOptMixin, FlexLMTrainer):
             self._optimizer_step(opt)
 
 
-class MemOptFlexLMKDTrainer(_MemOptMixin, FlexLMKDTrainer):
-    """FlexLMKDTrainer with chunked CE+KL loss and optional activation checkpointing."""
+class MemOptFlexLMKDTrainer(_MemOptMixin, LevelWeightingMixin, FlexLMKDTrainer):
+    """FlexLMKDTrainer with chunked CE+KL loss and optional activation checkpointing.
+    Also supports the level_weighting flag (training/level_weights.py); with it
+    unset (the default) the gradients are those of FlexLMKDTrainer."""
 
     def _step(self, batch, stage: str) -> None:
         input_ids, _ = batch
@@ -176,59 +179,71 @@ class MemOptFlexLMKDTrainer(_MemOptMixin, FlexLMKDTrainer):
             opt = self.optimizers()
             opt.zero_grad()
 
-        # Teacher forward, no grad, once per batch (unchanged from FlexLMKDTrainer)
-        with torch.no_grad():
-            teacher_logits = self._teacher(input_ids).logits
-
         levels = self._select_levels(stage)
-        teacher_rows = teacher_logits[:, :-1].reshape(-1, vocab_size)
+        weights = {i: self._level_weight(i, training) for i in levels}  # 1.0 unless level_weighting is set
+        zero = torch.zeros((), device=input_ids.device)
+        ce_loss = {i: zero for i in levels}
+        kl_loss = {i: zero for i in levels}
+        # Whole-batch normaliser, so micro-batches give the same loss and gradient.
+        n_total = input_ids.shape[0] * (input_ids.shape[1] - 1)
+
+        # micro_batch_size (training context, None = whole batch) splits the batch by
+        # sequence, so teacher and student [N, V] logits exist for one micro-batch at a
+        # time (job 28080: 16 x 1,024 tokens x 151,936 vocab ran out of memory at step 0).
+        bsz = input_ids.shape[0]
+        mb = getattr(self.training_context, "micro_batch_size", None) or bsz
+        for lo in range(0, bsz, mb):
+            mb_ids = input_ids[lo:lo + mb]
+            # Teacher forward, no grad, once per micro-batch (shared by all levels)
+            with torch.no_grad():
+                teacher_rows = self._teacher(mb_ids).logits[:, :-1].reshape(-1, vocab_size)
+
+            for i in levels:
+                self.submodel.set_level_use(i)
+                logits = self(mb_ids)
+                student_rows, targets, n_rows = self._flat_views(logits, mb_ids, vocab_size)
+                proxy = student_rows.detach().requires_grad_(True) if training else student_rows
+                w = weights[i]
+                for start in range(0, n_rows, chunk):
+                    end = min(start + chunk, n_rows)
+                    s = proxy[start:end]
+                    t = teacher_rows[start:end]
+                    # sum/n_total reproduces cross_entropy(reduction='mean') and
+                    # kl_div(reduction='batchmean') over the whole batch, chunk by chunk.
+                    ce_chunk = F.cross_entropy(s, targets[start:end], reduction="sum") / n_total
+                    kl_chunk = F.kl_div(
+                        F.log_softmax(s / T, dim=-1),
+                        F.softmax(t / T, dim=-1),
+                        reduction="sum",
+                    ) / n_total * (T ** 2)
+                    if training:
+                        chunk_loss = (1 - kd_lambda) * ce_chunk + kd_lambda * kl_chunk
+                        (chunk_loss * w if w != 1.0 else chunk_loss).backward()
+                    ce_loss[i] = ce_loss[i] + ce_chunk.detach()
+                    kl_loss[i] = kl_loss[i] + kl_chunk.detach()
+                if training:
+                    self._push_grad_through_model(student_rows, proxy)
+                del logits, student_rows, proxy
+            del teacher_rows
 
         total_loss = 0.0
-
         for i in levels:
-            self.submodel.set_level_use(i)
-            logits = self(input_ids)
-
-            student_rows, targets, n_rows = self._flat_views(logits, input_ids, vocab_size)
-            proxy = student_rows.detach().requires_grad_(True) if training else student_rows
-
-            ce_loss = 0.0
-            kl_loss = 0.0
-            for start in range(0, n_rows, chunk):
-                end = min(start + chunk, n_rows)
-                s = proxy[start:end]
-                t = teacher_rows[start:end]
-
-                # sum/n_rows reproduces cross_entropy(reduction='mean') and
-                # kl_div(reduction='batchmean') exactly, chunk by chunk.
-                ce_chunk = F.cross_entropy(s, targets[start:end], reduction="sum") / n_rows
-                kl_chunk = F.kl_div(
-                    F.log_softmax(s / T, dim=-1),
-                    F.softmax(t / T, dim=-1),
-                    reduction="sum",
-                ) / n_rows * (T ** 2)
-
-                if training:
-                    ((1 - kd_lambda) * ce_chunk + kd_lambda * kl_chunk).backward()
-                ce_loss = ce_loss + ce_chunk.detach()
-                kl_loss = kl_loss + kl_chunk.detach()
-
-            loss = (1 - kd_lambda) * ce_loss + kd_lambda * kl_loss
-            ppl = torch.exp(ce_loss)
-
+            loss = (1 - kd_lambda) * ce_loss[i] + kd_lambda * kl_loss[i]
             self.log(f"{stage}_level{i}_loss", loss, prog_bar=False, sync_dist=True)
-            self.log(f"{stage}_level{i}_ce_loss", ce_loss, prog_bar=False, sync_dist=True)
-            self.log(f"{stage}_level{i}_kl_loss", kl_loss, prog_bar=False, sync_dist=True)
-            self.log(f"{stage}_level{i}_ppl", ppl, prog_bar=(stage != "train"), sync_dist=True)
-
-            if training:
-                self._push_grad_through_model(student_rows, proxy)
+            self.log(f"{stage}_level{i}_ce_loss", ce_loss[i], prog_bar=False, sync_dist=True)
+            self.log(f"{stage}_level{i}_kl_loss", kl_loss[i], prog_bar=False, sync_dist=True)
+            self.log(f"{stage}_level{i}_ppl", torch.exp(ce_loss[i]), prog_bar=(stage != "train"), sync_dist=True)
+            self._record_level(i, loss, weights[i], training)
             total_loss += loss
 
         self.log(f"{stage}_loss", total_loss, prog_bar=(stage != "train"), sync_dist=True)
 
         if training:
+            self._finish_level_weights(training, input_ids.device)
             self._optimizer_step(opt)
+            if getattr(self.training_context, "warmup_ratio", None) is not None:
+                self.lr_schedulers().step()  # per-step schedule (Stage-1 contexts)
+            self._report_progress("kd", input_ids.numel(), levels=",".join(map(str, levels)))
 
 
 torch.serialization.add_safe_globals([MemOptFlexLMTrainer, MemOptFlexLMKDTrainer])

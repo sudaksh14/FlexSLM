@@ -23,6 +23,9 @@ if [[ "$KIND" == gpu ]]; then
     source /etc/profile.d/modules.sh
   fi
   module load cuda12.6/toolkit/12.6
+  # Job 28068 (1.7B SFT smoke, longest batches) hit OOM with 36.3 GB allocated and
+  # 7.9 GB reserved-but-free on a 44.7 GB A40: fragmentation, not real exhaustion.
+  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 fi
 
 source "/var/scratch/$USER/minimonda3/etc/profile.d/conda.sh"
