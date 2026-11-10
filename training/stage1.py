@@ -47,12 +47,26 @@ S1_PILOT_TOKENS = 20_000_000  # 1/5 of the final budget
 S1_FULL_TOKENS = 100_000_000  # user, 2026-11-10: 100M, must fit in 5 days; run once the recipe is final
 
 
-def load_pmc_memmap(data_dir: str = PMC_DATA_DIR, max_seq_length: int = 1024, batch_size: int = 16,
-                    train_tokens: int = S1_PILOT_TOKENS, val_batches: int = 40, test_batches: int = 100,
+def _world_size() -> int:
+    # Set before trainer.fit() by srun (SLURM_NTASKS: 2 on node205, 1 on node206) or torchrun.
+    return int(os.environ.get("WORLD_SIZE") or os.environ.get("SLURM_NTASKS") or 1)
+
+
+def load_pmc_memmap(data_dir: str = PMC_DATA_DIR, max_seq_length: int = 1024, global_batch_size: int = 32,
+                    train_tokens: int = S1_PILOT_TOKENS, val_windows: int = 640, test_windows: int = 1600,
                     seed: int = 1337, num_workers: int = 4, **_ignored):
     """Train windows from train.bin (train_tokens // max_seq_length of them), val
     and test windows from the separate val.bin / test.bin, whose documents are
-    disjoint from the training documents (prepare_pmc.py)."""
+    disjoint from the training documents (prepare_pmc.py).
+
+    global_batch_size is the number of sequences per optimizer step over all GPUs;
+    each rank's loader gets global_batch_size / world size, so a run on node205
+    (2 x A40, 16 per GPU) and on node206 (1 x A40, 32) take the same steps over the
+    same windows and validate on the same 640 windows."""
+    world = _world_size()
+    if global_batch_size % world:
+        raise ValueError(f"global_batch_size {global_batch_size} not divisible by {world} GPUs")
+    batch_size = global_batch_size // world
     meta_path = os.path.join(data_dir, "meta.json")
     if not os.path.exists(meta_path):
         raise FileNotFoundError(
@@ -75,8 +89,8 @@ def load_pmc_memmap(data_dir: str = PMC_DATA_DIR, max_seq_length: int = 1024, ba
                           collate_fn=collate, pin_memory=True, drop_last=True)
 
     return (make_loader("train", max(1, train_tokens // max_seq_length), True, seed),
-            make_loader("val", val_batches * batch_size, False, seed + 1),
-            make_loader("test", test_batches * batch_size, False, seed + 2))
+            make_loader("val", val_windows, False, seed + 1),
+            make_loader("test", test_windows, False, seed + 2))
 
 
 @dataclasses.dataclass
@@ -103,14 +117,14 @@ class Stage1Context(FlexTrainingContext):
     dwa_temperature: float = 2.0
 
     def __init__(self, train_tokens=S1_PILOT_TOKENS, data_dir=PMC_DATA_DIR, max_seq_length=1024,
-                 batch_size=16, kd_lambda=0.5, kd_temperature=2.0, teacher_hf_model="Qwen/Qwen3-1.7B",
+                 global_batch_size=32, kd_lambda=0.5, kd_temperature=2.0, teacher_hf_model="Qwen/Qwen3-1.7B",
                  num_levels_per_step=None, level_sampling="sandwich", lr=1e-4, weight_decay=0.0,
                  warmup_ratio=0.01, activation_checkpointing=True, loss_chunk_size=1024,
                  micro_batch_size=4, level_weighting="none", level_weight_lr=1e-2, level_weight_ema=0.9,
                  level_weights_fixed=None, dwa_window=50, dwa_temperature=2.0,
                  epochs=1, patience=1000, **kwargs):
         loader = functools.partial(load_pmc_memmap, data_dir=data_dir, max_seq_length=max_seq_length,
-                                   batch_size=batch_size, train_tokens=train_tokens)
+                                   global_batch_size=global_batch_size, train_tokens=train_tokens)
         FlexTrainingContext.__init__(self, loader, patience=patience, epochs=epochs, **kwargs)
         check_level_weighting(level_weighting, level_weight_lr, level_weight_ema,
                               level_weights_fixed, dwa_window, dwa_temperature)

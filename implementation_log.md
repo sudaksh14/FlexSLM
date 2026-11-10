@@ -182,7 +182,7 @@ max_seq 3072):
   `gpu_tests.sbatch`, `train.sbatch <cfg>` (node205 2×A40; smoke with
   `--export=ALL,SMOKE_STEPS=20`), `export.sbatch <cfg>` (fatq node201),
   `evalgen.sbatch <model>` (eval GPUs, excludes node205).
-- Rules: sbatch only; GPU on defq 205–208 (training node205, eval 206–208), CPU on
+- Rules: sbatch only; GPU on defq 205–208 (training node205, and node206 1x A40 for Stage-1 pilots (user, 2026-11-10): `sbatch --nodelist=node206 --gres=gpu:1 --ntasks-per-node=1 scripts/das6/train.sbatch <cfg>`; eval 206–208), CPU on
   fatq 201–203; `--time` = 2× pessimistic estimate (max 150 h); never `--mem`;
   never wait > 10 min for a job (submit, record IDs, chain with `afterok`).
 
@@ -331,8 +331,7 @@ max_seq 3072):
 - FaithMed checkpoints: not public (HF API search for faithmed / cxcscmu returns nothing; GitHub
   README only has training code and data-prep scripts, base model passed as a local path).
 - 28106 done: hidden_act ordering, untrained ppl L0/L1/L2 4,228 / 170 / 10.6 (none: 4,265 / 313).
-- T1 28083 slower with micro-batch 8: ~14 s/step vs ~9 s before (step 250 at 59 min), so ~4 h
-  total (limit 7 h).
+- T1 28083: ~9 s/step (step 416 at 65 min; the earlier "14 s/step" was a misread), ~2.6 h total.
 - Level count / continuum (user question): GQA (ratio 2) allows head counts 8, 10, ..., 16 in
   [0.5, 1], i.e. at most 5 levels with distinct heads; `_flex_llama_dims_fixed_head` now allows
   repeated head counts (hidden/FFN must still grow), so 7/9-level grids build. A true continuum
@@ -350,3 +349,17 @@ max_seq 3072):
   them one after another (behind T1 28083 and 28101).
 - Pilot scale: stay on 0.6B (main backbone; a 1.7B pilot needs a >1.7B teacher, still on hold,
   and ~3x the compute). Re-check only lr (+ the winning recipe vs base) at 1.7B later.
+- Stage-1 teacher = original Qwen/Qwen3-1.7B (HF, frozen); Stage-2 teacher = our T1 export
+  (`hf_export/flexllama__sft.paper.qwen3_1p7b_teacher/level2`, from 28083/28084). Not the student
+  report's 1.7B (old code).
+- node206 for pilots (user): Stage-1 batch is now global (`global_batch_size` 32 sequences, per
+  rank = 32 / world size from SLURM_NTASKS/WORLD_SIZE; val 640 / test 1,600 windows fixed), so
+  1-GPU and 2-GPU pilots take the same steps and validate on the same windows. 66 tests pass.
+  **28121** 1-GPU Stage-1 smoke on node206 passed: **1,593 tok/s**, 24.7 GB peak (batch 32,
+  micro 4), ~20.5 s/step; after 20 steps (0.66M tokens) val ppl L0/L1/L2 164 / 41.4 / 10.1
+  (untrained 4,265 / 313 / 10.6). Estimates: 20M pilot ≈ 3.5 h on node206, ≈ 1.8 h on node205
+  (2 GPUs, if it scales), 100M final ≈ 9 h on node205 (well inside 5 days).
+- Moved pilots to node206 (afterok 28121, --time 12 h): w_lossprop 28122, w_dwa 28123,
+  single 28124, levels5_sw3 28125, grid9_sw3 28126 (cancelled 28115-28117, 28119, 28120).
+  node205 keeps base 28107, order_hidden_act 28108, order_taylor 28109, lr5e-5 28110,
+  lr2e-4 28111, kd1 28112, w_fixed 28113, w_uncertainty 28114, levels5 28118 (afterok 28101).

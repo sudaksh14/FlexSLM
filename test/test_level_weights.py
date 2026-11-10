@@ -243,16 +243,28 @@ def test_stage1_weighting_scales_gradients():
         assert math.isclose(log[f"train_level{k}_loss"], ref_log[f"train_level{k}_loss"], rel_tol=1e-6)
 
 
-def test_pmc_memmap_loader(tmp_path):
+def test_pmc_memmap_loader(tmp_path, monkeypatch):
     import json
     import numpy as np
     from training.stage1 import load_pmc_memmap
     for split, n in (("train", 50_000), ("val", 5_000), ("test", 5_000)):
         np.arange(n, dtype=np.uint32).tofile(tmp_path / f"{split}.bin")
     (tmp_path / "meta.json").write_text(json.dumps(dict(dtype="uint32", train_tokens=50_000)))
-    train, val, test = load_pmc_memmap(str(tmp_path), max_seq_length=64, batch_size=4,
-                                       train_tokens=6_400, val_batches=2, test_batches=3, num_workers=0)
-    assert len(train.dataset) == 100 and len(val.dataset) == 8 and len(test.dataset) == 12
+    kw = dict(max_seq_length=64, global_batch_size=8, train_tokens=6_400, val_windows=8,
+              test_windows=12, num_workers=0)
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    sets = {}
+    for world in ("1", "2"):
+        monkeypatch.setenv("SLURM_NTASKS", world)
+        train, val, test = load_pmc_memmap(str(tmp_path), **kw)
+        assert len(train.dataset) == 100 and len(val.dataset) == 8 and len(test.dataset) == 12
+        assert train.batch_size * int(world) == 8  # same global batch on 1 or 2 GPUs
+        sets[world] = [val.dataset[i] for i in range(8)]
+    assert all(torch.equal(a, b) for a, b in zip(sets["1"], sets["2"]))  # same val windows
+    monkeypatch.setenv("SLURM_NTASKS", "3")
+    with pytest.raises(ValueError):
+        load_pmc_memmap(str(tmp_path), **kw)
+    monkeypatch.setenv("SLURM_NTASKS", "2")
     x, y = next(iter(test))
     assert x.shape == (4, 64) and torch.equal(x, y)
     assert int(x.max()) < 5_000  # test windows come from test.bin
