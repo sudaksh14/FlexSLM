@@ -384,3 +384,37 @@ max_seq 3072):
   loss weighting (lossprop, DWA) is within noise of equal weights; Taylor ordering gives -5% on
   L0/L1 despite the worse untrained ppl; hidden_act equals base.
 - Runtime: 20M pilot ~2.7 h on node205 (2 GPUs), 2.7 h (single) to 4.8 h (weighted) on node206 (1 GPU).
+- **ROOT-CAUSE ANALYSIS of the weak T1 teacher (avg 30.6 vs the student's 37.9)**, status 2026-11-11:
+  Ruled out by direct comparison with the student's code (git base 07daef4) and data:
+  * data: `data/medmix_sft/{train,val,test}.jsonl` are byte-identical (md5) to the student's copy; same
+    pre-rendered chat prompts (`<think>\n\n</think>\n\n`), same 33,406 examples;
+  * recipe on paper: lr 5e-5, 1% warm-up + cosine, 1 epoch, effective batch 32 (student 8 x 4 H100; ours
+    16 x 2 A40), 1,044 steps, bf16-mixed, max_seq 3072, CE on answer tokens only, same loss code
+    (`_step` is line-for-line the student's apart from micro-batching and weight hooks), same scheduler;
+  * eval script `eval/eval_gen.py`: only the `dtype=` kwarg changed; export `training/export_flex_hf.py`:
+    strict load of every tensor (incl. q/k norms), only `head_dim` handling added; model code only gained
+    the optional `head_dim`; trainer only gained clipping, seed, smoke hooks.
+  What actually differs: (1) **real gradient clipping at 1.0** (student: none; the old code silently
+  ignored it), (2) exact micro-batching (2 passes of 8 per step), (3) seed 0 / data order, (4) 2 A40
+  instead of 4 H100, (5) software: transformers 4.51.1, Lightning 2.5.3, torch 2.7.0 (student's env unknown).
+  Training itself looks healthy: val CE (answers) falls monotonically 0.465 -> 0.357, token acc 0.81 -> 0.86.
+  **Leading hypothesis = clipping**: our supervision is ~7 tokens/example (~230 answer tokens per step), so
+  raw gradient norms are probably >> 1; clipped, Adam sees ~constant-norm gradients and keeps full-size
+  updates, while the unclipped student run had Adam's second-moment memory dominated by large early
+  gradients, i.e. a smaller effective LR late in training => less forgetting (student's teacher kept MedQA
+  47.9; ours 38.6). Not yet measured: grad norms are now logged (`grad_norm`, pre-clip, in the `[sft]`
+  progress line and as a wandb metric).
+  Experiments submitted: **E_A 28131** `sft.diag.qwen3_1p7b_teacher.noclip` (T1 recipe, clip off, 2 GPU,
+  node205), **E_D 28132** `sft.diag.qwen3_1p7b_teacher.1gpu` (T1 recipe, clip 1.0, ONE GPU, node206,
+  batch 32 per GPU, ~5.5 h) as a control for multi-GPU sync. Pending pilots 28113/28114/28118/28126
+  cancelled to free the nodes (kd1 28112 and levels5_sw3 28125 left running); resubmit after.
+  Evidence that DDP sync works: Stage-1 1-GPU pilots (node206) and 2-GPU pilots (node205) give matching ppl.
+- **B0 finding**: untrained Qwen3-1.7B and 0.6B score ~0 under the 32-token answer-only protocol (no
+  `\boxed` in 100% of the answers: the model reasons step by step first). So the student's "untrained"
+  rows (1.7B avg 34.5, MedQA 48.0) cannot come from this protocol; they were presumably generated with a
+  long budget. The paper's untrained baseline must state its own protocol (long generation), and the
+  paragraph in `main.tex` blaming "our short answer-only decoding budget" is wrong. Fidelity check
+  **28133**: untrained 1.7B, MedQA only, 1,536 new tokens (should reproduce the student's 48.0).
+- The user has the student's checkpoints on SURFdrive (https://surfdrive.surf.nl/apps/files/files/19533381278?dir=/FlexSLM,
+  a login-only page: I cannot read it). With the old teacher export I can evaluate it with our pipeline:
+  the decisive test of eval vs training. Needs a public share link or an upload to DAS-6.

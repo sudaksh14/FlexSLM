@@ -109,8 +109,12 @@ class FlexModelTrainer(pl.LightningModule, BaseTrainer):
         """Clips the global gradient norm (when gradient_clip_val is set), then
         steps. Manual optimization bypasses Lightning's own clipping."""
         clip = getattr(self.training_context, "gradient_clip_val", None)
-        if clip:
-            self.clip_gradients(opt, gradient_clip_val=clip, gradient_clip_algorithm="norm")
+        # clip_grad_norm_ returns the global norm *before* clipping; with max_norm=inf it
+        # only measures. Same parameters and algorithm as Lightning's clip_gradients.
+        params = [p for p in self.parameters() if p.grad is not None]
+        norm = torch.nn.utils.clip_grad_norm_(params, float(clip) if clip else float("inf"))
+        self.__dict__["_grad_norm"] = float(norm)
+        self.log("grad_norm", norm, prog_bar=False, sync_dist=False)
         opt.step()
 
     def on_train_epoch_end(self):

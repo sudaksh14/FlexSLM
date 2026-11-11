@@ -95,6 +95,18 @@ SFT_RUNS = [
         hf_preset="qwen3-1.7b-gqa", kd_lambda=0.0, train_levels=[2],
         level_fractions=(0.5, 0.75, 1.0),
         wandb_project_name="MedNest_qwen3_1p7b_teacher")),
+    # Root-cause diagnostics for the weak T1 teacher (avg 30.6 vs 37.9 for the student's run,
+    # see implementation_log.md 2026-11-11). E_A: the T1 recipe without gradient clipping,
+    # which the student's runs did not have. E_D: T1 on ONE GPU (32 per step, 8 per pass) to
+    # rule out multi-GPU gradient sync. Both log the raw (pre-clip) gradient norm.
+    ("sft.diag.qwen3_1p7b_teacher.noclip", None, dict(_PAPER,
+        hf_preset="qwen3-1.7b-gqa", kd_lambda=0.0, train_levels=[2],
+        level_fractions=(0.5, 0.75, 1.0), gradient_clip_val=None,
+        wandb_project_name="MedNest_diag_teacher_noclip")),
+    ("sft.diag.qwen3_1p7b_teacher.1gpu", None, dict(_PAPER,
+        hf_preset="qwen3-1.7b-gqa", kd_lambda=0.0, train_levels=[2],
+        level_fractions=(0.5, 0.75, 1.0), batch_size=32,
+        wandb_project_name="MedNest_diag_teacher_1gpu")),
     # Conventional fine-tuning of the full Qwen3-0.6B: the 0.6B baseline.
     ("sft.paper.qwen3_0p6b_conventional", None, dict(_PAPER,
         hf_preset="qwen3-0.6b", kd_lambda=0.0, train_levels=[2],

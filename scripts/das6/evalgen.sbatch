@@ -9,10 +9,13 @@
 #SBATCH --time=01:30:00
 #SBATCH --output=jobs/%x-%j.out
 # Answer-only generated evaluation on the seven FaithMed test sets (eval/eval_gen.py).
-#   sbatch scripts/das6/evalgen.sbatch <hf model dir or id> [max_new_tokens] [batch_size]
+#   sbatch scripts/das6/evalgen.sbatch <hf model dir or id> [max_new_tokens] [batch_size] [sources]
+# sources: comma-separated subset of the test sets (e.g. openlifescienceai/medqa); long
+# generation budgets (untrained models reason before answering) also need a longer --time.
 MODEL=${1:?"usage: sbatch scripts/das6/evalgen.sbatch <hf_model> [max_new_tokens] [batch_size]"}
 MAX_NEW=${2:-32}
 BS=${3:-32}
+SRC=${4:-}
 source scripts/das6/common.sh gpu
-OUT="results/gen.$(echo "$MODEL" | tr '/' '-').t$MAX_NEW.json"
-python -m eval.eval_gen "$MODEL" --out "$OUT" --max_new_tokens "$MAX_NEW" --batch_size "$BS"
+OUT="results/gen.$(echo "$MODEL" | tr '/' '-').t$MAX_NEW${SRC:+.$(echo "$SRC" | tr '/,' '-+')}.json"
+python -m eval.eval_gen "$MODEL" --out "$OUT" --max_new_tokens "$MAX_NEW" --batch_size "$BS" ${SRC:+--sources "$SRC"}

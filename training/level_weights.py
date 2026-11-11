@@ -235,5 +235,7 @@ class LevelWeightingMixin:
         d["_last_report"], d["_tok_since"] = now, 0
         mem = torch.cuda.max_memory_allocated() / 2**30 if torch.cuda.is_available() else 0.0
         fields = " ".join(f"{k} {v}" for k, v in extra.items())
+        if d.get("_grad_norm") is not None:  # pre-clip global gradient norm of this step
+            fields += f" grad_norm {d['_grad_norm']:.3f}"
         print(f"[{tag}] rank {self.global_rank} step {step} {fields} tok/s {rate:.0f} "
               f"max_mem {mem:.1f}GB", flush=True)
