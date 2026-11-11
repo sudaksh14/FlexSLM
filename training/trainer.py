@@ -201,6 +201,16 @@ def check_level_sampling(level_sampling: str) -> None:
         raise ValueError(f"level_sampling must be one of {LEVEL_SAMPLING}, got {level_sampling!r}")
 
 
+def adamw(params, lr: float, weight_decay: float) -> torch.optim.AdamW:
+    """AdamW with the fused CUDA kernel when every parameter is on the GPU (Lightning
+    builds the optimizer after moving the model), the default implementation otherwise
+    (CPU tests). Same algorithm and state format; results differ only by rounding."""
+    params = list(params)
+    fused = torch.cuda.is_available() and all(p.is_cuda for p in params)
+    print(f"[optim] AdamW lr {lr} weight_decay {weight_decay} fused {fused}", flush=True)
+    return torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay, fused=fused or None)
+
+
 def warmup_cosine_scheduler(optimizer, total_steps: int, warmup_ratio: float):
     """Linear warmup over the first warmup_ratio of the steps, then cosine to 0,
     stepped after every optimizer step: the schedule HF Trainer (and so

@@ -27,7 +27,7 @@ import config.paths as paths
 import utils
 from training import FlexLMKDTrainer, FlexTrainingContext, TrainerBuilder
 from training.importance_order import FINAL_ORDERING, start_weights
-from training.trainer import check_level_sampling, warmup_cosine_scheduler
+from training.trainer import adamw, check_level_sampling, warmup_cosine_scheduler
 from training.level_weights import LevelWeightingMixin, check_args as check_level_weighting
 
 IGNORE_INDEX = -100
@@ -281,7 +281,7 @@ class SFTTrainingContext(FlexTrainingContext):
         self.micro_batch_size = micro_batch_size
 
     def make_optimizer(self, model):
-        return optim.AdamW(model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        return adamw(model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
 
     def make_scheduler(self, optimizer):
         # Stepped once per epoch (FlexModelTrainer.on_train_epoch_end).

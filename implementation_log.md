@@ -480,3 +480,8 @@ max_seq 3072):
     (the old text called it SFT).
   * Lessons and the 1.7B paragraph shortened to stay at 12 pages; three 9-column tables scaled to \textwidth (they
     were 48-58 pt too wide).
+- Optimizer: `training.trainer.adamw` = AdamW with `fused=True` when all params are on CUDA (else default), used by
+  `SFTTrainingContext` and `Stage1Context`; prints `[optim] AdamW ... fused True/False` at start. Same algorithm and
+  state format, rounding-level differences only; expected gain <0.5% of step time (optimizer ~50-100 ms of a 9-16 s
+  step). lr / weight decay unchanged (user only wanted fused). Applies to jobs starting after this sync (pending pilots
+  28141-28143 and everything later), not to running ones.

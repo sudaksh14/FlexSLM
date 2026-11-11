@@ -40,7 +40,7 @@ from training import FlexTrainingContext, TrainerBuilder
 from training.level_weights import CONTEXT_DEFAULTS as _LW_DEFAULTS, check_args as check_level_weighting
 from training.importance_order import FINAL_ORDERING
 from training.memopt import MemOptFlexLMKDTrainer
-from training.trainer import check_level_sampling, warmup_cosine_scheduler
+from training.trainer import adamw, check_level_sampling, warmup_cosine_scheduler
 
 PMC_DATA_DIR = os.path.join("data", "pmc_qwen3")
 S1_PILOT_TOKENS = 20_000_000  # 1/5 of the final budget
@@ -149,7 +149,7 @@ class Stage1Context(FlexTrainingContext):
         self.dwa_temperature = dwa_temperature
 
     def make_optimizer(self, model):
-        return optim.AdamW(model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        return adamw(model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
 
     def make_step_scheduler(self, optimizer, total_steps: int):
         return warmup_cosine_scheduler(optimizer, total_steps, self.warmup_ratio)
