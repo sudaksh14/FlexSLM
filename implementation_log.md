@@ -363,3 +363,24 @@ max_seq 3072):
   single 28124, levels5_sw3 28125, grid9_sw3 28126 (cancelled 28115-28117, 28119, 28120).
   node205 keeps base 28107, order_hidden_act 28108, order_taylor 28109, lr5e-5 28110,
   lr2e-4 28111, kd1 28112, w_fixed 28113, w_uncertainty 28114, levels5 28118 (afterok 28101).
+
+### 2026-11-11
+- **T1 finished** (28083 trained 1,044 steps, 28084 export, 28085 eval; Stage-2 smoke 28102 passed at
+  28.2 GB, Stage-1 2-GPU smoke 28101 passed at ~1,200 tok/s per GPU). Teacher level2 eval (answer-only,
+  32 tokens): MedQA 38.6, MCQA 40.9, HeadQA 47.7, Calc 25.3, Bullets 29.9, Pro-H 20.7, Xpert 11.1,
+  **Avg 30.6, no_boxed 0**. **Worse than our untrained 1.7B (34.5) and the old conventional FT (37.9,
+  old code)**. Export checks out (bf16 Qwen3ForCausalLM, 1.72B params, config correct, answers well
+  formed). Cause unknown. Do NOT start Stage 2 until resolved: the teacher feeds all Stage-2 KD.
+  B0 evals submitted to compare under the same pipeline: Qwen3-1.7B **28129**, Qwen3-0.6B **28130**.
+  Differences vs the old run: real grad clipping 1.0, effective batch 32 (old 16), 1,044 steps
+  (old 2,088), preset qwen3-1.7b-gqa, micro-batch 8.
+- **Stage-1 pilots (20M tokens, val ppl L0/L1/L2 on PMC val; untrained 4,265 / 313 / 10.6)**:
+  base 17.4/11.3/7.54 · order_hidden_act 17.4/11.4/7.54 · order_taylor **16.6/10.6**/7.55 ·
+  lr5e-5 21.5/12.8/7.56 · lr2e-4 **14.8/10.5**/7.71 · w_lossprop 17.0/11.3/7.56 · w_dwa 17.3/11.3/7.51 ·
+  single 21.1/12.8/8.14 · kd1 (in progress, 286/610: 31.0/17.7/10.4 at mid-run) · levels5_sw3 (79%) ·
+  w_fixed, w_uncertainty, levels5, grid9_sw3 still queued. One seed, so differences of a few
+  percent are not established. Findings so far: recovery works (L0 4,265 -> ~17); a higher lr helps the
+  small levels (-15% L0) at +2% on L2; all-levels per step beats one level per step (single: +21% L0, +8% L2);
+  loss weighting (lossprop, DWA) is within noise of equal weights; Taylor ordering gives -5% on
+  L0/L1 despite the worse untrained ppl; hidden_act equals base.
+- Runtime: 20M pilot ~2.7 h on node205 (2 GPUs), 2.7 h (single) to 4.8 h (weighted) on node206 (1 GPU).
