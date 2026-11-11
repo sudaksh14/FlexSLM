@@ -444,3 +444,21 @@ max_seq 3072):
   to settle eval-vs-training.
 - E_D (28132, 1-GPU control) cancelled by the user: GPU count cannot change accuracy if gradient sync works (Stage-1
   pilots on 1 and 2 GPUs already agree).
+- **Eval/software ruled out**: the student's old teacher, exported and scored with OUR pipeline (28136, 32 tokens):
+  47.8/46.2/60.9/32.4/36.9/28.2/11.4 = **37.7** (student 37.9, 0% unboxed). Untrained Qwen3-1.7B on MedQA with 1,536
+  new tokens (28133): **48.2** (student 48.0). So eval, export, transformers 4.51.1 and torch 2.7 reproduce the old
+  numbers: **the gap (our T1 30.6 vs 37.7) is entirely in training.**
+- **Clipping mechanism measured** (E_A 28131 raw grad norms, pre-clip): ~390, 401, 287, 315 at steps 1-4, 85, 18, 10
+  by step 7, 5-16 at steps 10-20, 2.8 at step 50, 4.4 at step 100 (clip threshold 1.0) => our T1 clipped on EVERY step,
+  mostly by 3-400x, so Adam saw constant-norm gradients; unclipped, the early spike dominates Adam's v and damps
+  later updates. Our weights moved 2.5-3x further than the old teacher's (28135). Chained for E_A: export 28137,
+  eval 28138, weight comparison 28139. If E_A ~ 37-38 with old-sized weight change: set `gradient_clip_val=None` for the
+  SFT configs (`_PAPER`), retrain T1, then proceed to Stage 2. Stage 1 also clips at 1.0: its grad norms are logged in
+  the resubmitted pilots; decide after reading them whether key Stage-1 pilots must be re-run unclipped.
+- Resubmitted pilots on node206 (clip 1.0 like the finished ones, for comparability; they now log grad_norm):
+  w_fixed 28140, w_uncertainty 28141, levels5 28142, grid9_sw3 28143. Finished so far: base, order_hidden_act,
+  order_taylor, lr5e-5, lr2e-4, w_lossprop, w_dwa, single, kd1 (28112), levels5_sw3 (28125).
+- **Paper: do not edit until all final results exist (user, 2026-11-11).** TODO list for the final paper pass:
+  untrained baselines use a 1,024-token protocol (state it, or re-run at a common protocol); remove the sentence
+  attributing our untrained 1.7B gap to a "short answer-only decoding budget"; ordering is a pilot dimension
+  (Taylor is no longer assumed); reference table / MatFormer baseline text already in; 12-page limit.
