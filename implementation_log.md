@@ -462,3 +462,21 @@ max_seq 3072):
   untrained baselines use a 1,024-token protocol (state it, or re-run at a common protocol); remove the sentence
   attributing our untrained 1.7B gap to a "short answer-only decoding budget"; ordering is a pilot dimension
   (Taylor is no longer assumed); reference table / MatFormer baseline text already in; 12-page limit.
+- **Paper updated once more at the user's request (2026-11-11), then FROZEN until all final results exist.**
+  Changes in `paper/main.tex` (12 pages, no undefined refs; draft PDF refreshed):
+  * new Sect. 5.3 "Training cost compared with prior work" + Table `tab:cost` (reported budgets): MatFormer 10-80B
+    tokens (78M-850M from scratch; 256 TPUv3 for 850M), Flextron 89.9B + 1.05B router (Llama-2-7B), LLaMaFlex 60.4B
+    (Llama-3.1-8B), Minitron 94B per model (15B -> 8B, 4B), Nemotron Elastic 110B (12B -> 9B, 6B); Meditron 48.1B
+    (588.8 GPU-h A100, model card), PMC-LLaMA 75B (4.8M papers + 30K books), BioMistral 3B tokens, 1.5 epochs
+    (<=20 h on 32 A100), Apollo 2.5B, MedMobile 400K questions x3 epochs (83 h, 4 A100 nodes), FaithMed 28,368 SFT
+    samples + 300 RL steps (~32 h on 4 H100); ours 0.10B (Stage 1) + 13.3M (Stage 2; 13,073,630 prompt + 244,682
+    answer tokens, 7.3 answer tokens/example, counted with the Qwen3 tokenizer). Our GPU-hours left as \tbd.
+  * Importance ordering rewritten as a choice among none / hidden-activation / Taylor, selected after Stage 1
+    (states the untrained-ppl finding: Taylor 4,265 -> 26,698 on L0; 453/512 overlap); \tbd{ordering}.
+  * Stage 1: 100M tokens, pilots of 20M choose the hyperparameters; ppl thousands -> ~17 after 20M; 13.3M / 0.24M.
+  * Stage 2: gradient-norm observation (300-400 early, 3-15 later) and the clipping effect; decision \tbd{no clip}.
+  * Evaluation: untrained backbones get 1,024 new tokens (0% at 32); baseline (i) and Table qwen17 dagger note;
+    wrong "short decoding budget" sentence replaced; FaithMed 41.0 correctly attributed to agentic search + GRPO
+    (the old text called it SFT).
+  * Lessons and the 1.7B paragraph shortened to stay at 12 pages; three 9-column tables scaled to \textwidth (they
+    were 48-58 pt too wide).
