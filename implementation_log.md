@@ -418,3 +418,29 @@ max_seq 3072):
 - The user has the student's checkpoints on SURFdrive (https://surfdrive.surf.nl/apps/files/files/19533381278?dir=/FlexSLM,
   a login-only page: I cannot read it). With the old teacher export I can evaluate it with our pipeline:
   the decisive test of eval vs training. Needs a public share link or an upload to DAS-6.
+- **Student's checkpoints fetched** (public SURFdrive share, token in `scripts/das6/fetch_old_ckpts.sbatch`, WebDAV
+  via `scripts/fetch_surfdrive.py`, ~240 MB/s) to `/var/scratch/skalra/flexslm/old_ckpts/`: `repo/` (code snapshot
+  23-27 Oct, `results/` incl. his `gen.*.json`), `saved_models/` {`..._qwen3_1p7b_teacher.pt` (20 Oct, 7.15 GB,
+  the report's teacher), `..._flexxxxslm.pt` (21 Oct, report's nested), `..._10L_teacher.pt`, `..._10L_shard.pt`
+  (27 Oct, 7.76 GB: later 10-level runs, 3 sampled per step; `_shard` = SHARD progressive transfer, `_teacher` = KD
+  from the teacher; L9 avg 40.0 / 39.0, small levels at chance, NOT the report's models)}. Not downloaded: `checkpoints/`
+  (83 GB Lightning ckpts incl. hyper_parameters/optimizer state; only for flexslm, 10L_teacher, 10L_shard).
+  The share's `repo/` snapshot is identical to our base commit 07daef4 for training.py, utils.py, eval_gen.py,
+  training_memopt.py; sft.py differs only by the 10L/SHARD additions.
+- **Student's own eval results** (`old_ckpts/repo/results/gen.*.json`): teacher L2 (t64) 47.9/46.6/61.1/31.9/37.6/
+  28.5/11.4 = **37.9** (0% unboxed); nested flexslm L2 49.9/48.6/63.3/33.4/43.0/30.0/12.0 = **40.0**, L1 19.1, L0 18.7;
+  kdteacher L2 39.1; `sft.medmix_qwen3_1p7b` (KD from the UNTRAINED 1.7B) L2 26.2 (25% unboxed) and L0/L1 5.7/5.9;
+  **untrained 1.7B: `.init-level2.t1024` = 34.5** (3.9% unboxed) => the "untrained" rows were generated with 1,024
+  new tokens, the fine-tuned ones with 32-64. Paper must label this and the main-text sentence about a "short
+  decoding budget" must be fixed. 10L runs: L9 40.0/39.0, L5 16.7/17.9, L0 18.8/18.1.
+- **Weight-change analysis (28135, `scripts/compare_teachers.py`)**, ||W_ft - W_base|| / ||W_base|| vs the HF
+  Qwen3-1.7B: old teacher vs OUR T1 teacher: gate/up/down 0.0103-0.0108 vs 0.0253-0.0266 (x2.5), q/k/v/o
+  0.0089-0.0099 vs 0.0247-0.0288 (x2.7-2.9), norms x2-3, embeddings 0.0217 vs 0.0196 (same); overall 0.00365 vs
+  0.00605; mean |delta| 3.3e-4 vs 6.0e-4. Cosine of the two deltas only 0.16-0.24. **Our fine-tune moved the
+  transformer weights ~2.5-3x further than the student's, with the same data, lr and schedule**: strongly consistent
+  with the clipping hypothesis (clipped Adam keeps full-size updates; unclipped, early large gradients inflate
+  Adam's second moment and damp later updates). E_A (28131, no clipping, grad norms logged) is the test.
+  Old teacher exported to `hf_export/old_teacher_1p7b/level2` and evaluated in OUR pipeline: **28136** (32 tokens)
+  to settle eval-vs-training.
+- E_D (28132, 1-GPU control) cancelled by the user: GPU count cannot change accuracy if gradient sync works (Stage-1
+  pilots on 1 and 2 GPUs already agree).
