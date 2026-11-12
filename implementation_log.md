@@ -555,3 +555,19 @@ max_seq 3072):
   sbatch --time=07:00:00 --dependency=afterok:$o scripts/das6/train.sbatch s1.qwen3_0p6b.pilot.order_minitron_lr2e-4
   ```
   (calibration = the sbatch default 512 x 512 PMC train tokens, batch 1, same as the Taylor checkpoint 28100.)
+- **Cluster down (user, 2026-11-12).** Brainstorm on KD / continuum from Flextron, LLaMaFlex, Minitron (+ Llama-3.1-Minitron,
+  arXiv 2408.11796). Facts checked in the papers: Flextron trains 3 random sub-models + full per step with plain CE
+  against labels (no KD), 89.9B tokens, routers pick per-layer widths; LLaMaFlex: 4 anchor budgets, Gumbel router
+  interpolates the budget embedding (interpolated models land on the curve, Table 2), policy-aware modulation (sinusoidal
+  width embedding -> MLP scale/shift after elastic MLP/MHA, 0.02M params each, val loss -0.08 at 800 iters), KD not
+  described; Minitron: forward KL logit-only best (CE mixing slightly worse 2.117 vs 2.107), T=1 best of {0.1,0.5,1,3},
+  top-K hurts, reverse KL worse, intermediate-state losses only help when depth is cut (width-only: no gain), biggest
+  teacher best (15B > 8B for 4B); Llama-3.1-Minitron: **teacher correction** (fine-tune the teacher on the distillation
+  data first, ~100B tokens, -6% LM val loss; correcting in parallel during distillation is on par).
+  Our code: Stage 1 = (1-l) CE + l KL, l 0.5, T 2, teacher = UNTRAINED HF Qwen3-1.7B (never saw PMC); Stage 2 KD covers
+  every real token (prompt + answer, `rows = real` when kd_lambda > 0), CE only the answer, KL normalised over all tokens
+  (answer tokens ~1.8% of the KD mass).
+  Main hypothesis: the Stage-1 teacher is worse on PMC than our student's full level after 20M tokens (L2 7.54), which
+  would explain why pure KD (kd1) hurt L2 (9.76) although Minitron finds KD-only best. Not yet measured: needs the
+  teacher's PMC val ppl (one short eval job). Missing pilots: kd0 (CE only), T1, corrected teacher. Proposal and
+  priorities given to the user in chat; nothing implemented yet.
