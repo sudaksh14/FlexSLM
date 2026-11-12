@@ -485,3 +485,49 @@ max_seq 3072):
   state format, rounding-level differences only; expected gain <0.5% of step time (optimizer ~50-100 ms of a 9-16 s
   step). lr / weight decay unchanged (user only wanted fused). Applies to jobs starting after this sync (pending pilots
   28141-28143 and everything later), not to running ones.
+
+### 2026-11-12
+- **E_A settles the T1 root cause: gradient clipping.** `sft.diag.qwen3_1p7b_teacher.noclip` (28131 -> export 28137
+  -> eval 28138, 32 tokens): MedQA 46.4, MCQA 46.4, HeadQA 61.2, Calc 30.4, Bullets 34.2, Pro-H 28.7, Xpert 10.3 =
+  **avg 36.8**, 0% unboxed (clipped T1 30.6; student's teacher in our pipeline 37.7). Weight change vs HF Qwen3-1.7B
+  (28139): ratio new/old **1.00** in every group (clipped T1: 2.5-3x), cosine of the deltas 0.69-0.93 (clipped T1:
+  0.16-0.24). The remaining 0.9 points (mostly Bullets -3.4, Calc -1.5) are within seed/data-order noise (Bullets n=298,
+  SE 2.7). Raw grad norm 392 at step 1, 3.6 at step 750.
+- Decisions taken (pre-agreed conditional from 2026-11-11): `_PAPER` now `gradient_clip_val=None` (all paper SFT runs,
+  incl. Stage 2 and B1/B2); **T1 is not retrained**: E_A is exactly the T1 recipe without clipping, so
+  `_FT_TEACHER_1P7B` = `hf_export/flexllama__sft.diag.qwen3_1p7b_teacher.noclip/level2` (Stage-2 teacher and the 1.7B
+  conventional-FT row of the paper, avg 36.8). The clipped T1 export stays under its name, reference only.
+- **Stage-1 pilots complete** (20M tokens, PMC val ppl at widths 0.5 / 0.75 / 1.0; untrained 4,265 / 313 / 10.6):
+
+  | arm | L0 | L1 | L2 | note |
+  |---|---|---|---|---|
+  | base | 17.4 | 11.3 | 7.54 | lr 1e-4, KD 0.5, 3 levels/step, clip 1.0 |
+  | order_hidden_act | 17.4 | 11.4 | 7.54 | = base |
+  | order_taylor | **16.6** | **10.6** | 7.55 | -5% / -6% |
+  | lr5e-5 | 21.5 | 12.8 | 7.56 | worse |
+  | lr2e-4 | **14.8** | **10.5** | 7.71 | -15% / -7%, +2% L2 |
+  | kd1 (pure KD) | 25.1 | 15.4 | 9.76 | worse (ppl favours CE; still clearly worse) |
+  | w_fixed 3/1/1 | 16.8 | 11.6 | 7.56 | -3% L0, +3% L1 |
+  | w_uncertainty | 17.6 | 11.3 | 7.49 | ~ base |
+  | w_lossprop | 17.0 | 11.3 | 7.56 | ~ base |
+  | w_dwa | 17.3 | 11.3 | 7.51 | ~ base |
+  | single | 21.1 | 12.8 | 8.14 | worse everywhere |
+  | levels5 (0,2,4) | 17.3 | 11.2 | 7.59 | ~ base at ~2.7x the time (7.3 h vs 2.7 h on 1 vs 2 GPUs) |
+  | levels5_sw3 (0,2,4) | 17.1 | 12.2 | 7.55 | middle +8% |
+  | grid9_sw3 (0,4,8) | 17.2 | 12.6 | 7.56 | middle +12% (gives 9 deployable widths) |
+
+  Conclusions (one seed): lr and ordering are the only knobs that clearly move the small levels; KD 0.5 > pure KD;
+  all levels per step > one random level; level weighting is noise (A4 stays an ablation, equal weights in the
+  recipe); dense grids cost the middle width a little. Stage 1 also clipped on every step (grad norm 430-650 at
+  steps 1-5, ~15 at step 50, ~5-6 at step 550 vs threshold 1.0).
+- Code: `_PAPER` unclipped, teacher repointed (training/sft.py); round-2 pilot arms `noclip`, `order_taylor_lr2e-4`,
+  `order_taylor_lr2e-4_noclip` (training/stage1.py). 66 local tests pass. Commit "Paper SFT without gradient clipping...".
+- Note: `scripts/das6/sync.sh` must be run with `SSH_AUTH_SOCK=$HOME/.ssh/agent.sock`; without it the sync fails
+  silently-ish ("Permission denied") and sbatch runs the OLD code. First submission 28144-28149 was made on stale code
+  and cancelled after 9 s (no outputs written); resynced and verified.
+- Jobs: **B1** `sft.paper.qwen3_0p6b_conventional` (unclipped) **28150** (node205) -> export **28151** -> eval **28152**;
+  Stage-1 round 2: `order_taylor_lr2e-4` **28153**, `order_taylor_lr2e-4_noclip` **28154** (node205, after B1),
+  `noclip` **28155** (node206, 1 GPU).
+- Next: read round 2; then set `FINAL_ORDERING` (taylor is the current favourite), lr and clipping of
+  `s1.qwen3_0p6b.full` (100M, ~9 h on node205), and run A2 `...nested.no_stage1` (needs FINAL_ORDERING). User
+  sign-off needed for the final Stage-1 recipe before the 100M run.
