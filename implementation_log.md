@@ -571,3 +571,39 @@ max_seq 3072):
   would explain why pure KD (kd1) hurt L2 (9.76) although Minitron finds KD-only best. Not yet measured: needs the
   teacher's PMC val ppl (one short eval job). Missing pilots: kd0 (CE only), T1, corrected teacher. Proposal and
   priorities given to the user in chat; nothing implemented yet.
+- **User decisions (2026-11-12):** teacher correction approved (queue when the cluster is up); implement and compare
+  ALL four continuum methods; widths below 0.5 are not expected to work zero-shot because they are never trained, so a
+  level list down to 0.25 is an ablation for the final experiments only.
+- **Implemented locally (cluster down), 79 local tests pass:**
+  * `FlexLLaMA.set_widths(hidden, intermediate, heads)`: run at ANY prefix width, uniform or per layer (residual width
+    shared); `dims_override` on fm.Linear, `dim_override` on Embedding/RMSNorm, `heads_override` on RoPEAttention
+    (KV heads follow the GQA ratio); `set_level_use` clears them. Exact match with a real level of the same width (test).
+  * Method 3a `FlexLLaMAConfig.level_norms`: per-width zero-init offsets `level_delta` on every residual RMSNorm,
+    linear interpolation in the width between trained levels, clamped outside; folded on export.
+  * Method 3b `FlexLLaMAConfig.modulation` = "scale" | "scale_shift": LLaMaFlex modulation (`WidthModulation`,
+    sinusoidal 16-dim embedding per fraction of hidden and block width -> MLP 128 -> scale (and shift), zero-init, never
+    applied at full width) on attention and MLP outputs; ~0.27M params per module, 56 modules (~15M, training only).
+    Export folds the scale into o_proj/down_proj rows (test: HF logits == flex logits); shift cannot be exported to Qwen3
+    (no MLP bias) -> NotImplementedError. Continuum params (level_delta, *_mod) get their own AdamW group
+    `continuum_lr` 1e-3, no weight decay (LLaMaFlex used 4e-2 for its modulation nets; ours is a guess).
+  * Method 2 `Stage1Context.anchor_levels`: anchors always trained, remaining `num_levels_per_step` slots random
+    (seeded by (seed, step)). Pilot `grid9_anchors_plus1` = 9-level 1/16 grid, anchors 0/4/8 (= 0.5/0.75/1.0) + 1 random.
+  * Methods 1 and 4: `eval/eval_continuum.py` (+ `scripts/das6/eval_continuum.sbatch`): PMC val ppl on the Stage-1 val
+    windows (so anchors reproduce the pilots' val ppl) for trained levels, uniform widths 0.25...1.0 step 1/16, and 36
+    Mix'n'Match configs (between adjacent anchors: residual of the bigger anchor with k = 7/14/21 layers' MLP+heads at
+    the smaller, or the reverse; k layers first / last / spread), with total and non-embedding params; `--hf` for plain
+    HF models (teacher PMC ppl). CPU smoke on the real Qwen3-0.6B warm start: levels == set_widths exactly; params
+    L0/L1/L2 188M / 364M / 596M, 0.25 width 66M.
+  * KD: pilots `kd0`, `T1`, `kd_corrected`, `kd1_corrected`; `s1.qwen3_1p7b.teacher_correction` (full Qwen3-1.7B, one
+    level, CE only, 20M PMC tokens, lr 2e-5, no clip) -> export level0 = `stage1.CORRECTED_TEACHER_1P7B`.
+    `s1.qwen3_0p6b.full.w025` (fractions 0.25/0.5/0.75/1.0, final ablation only, not queued).
+  * **Bug fixed**: `MemOptFlexLMKDTrainer._step` always ran the teacher, so any Stage-1 run with kd_lambda 0 would
+    have crashed (teacher not loaded). Now skipped; test: kd0 gradient == CE trainer gradient.
+- **To run when DAS-6 is back:** sync, check 28150-28155, then `bash scripts/das6/queue_2026-11-12.sh` (ids appended to
+  `jobs/queue_2026-11-12.ids`): PMC ppl of Qwen3-1.7B/0.6B; continuum eval of base(.init), levels5, levels5_sw3,
+  grid9_sw3, order_taylor, lr2e-4; Minitron ordering + timing (node207); node205: teacher correction -> export ->
+  kd_corrected, kd1_corrected, plus kd0, T1, order_minitron(_lr2e-4); node206: grid9_anchors_plus1, level_norms,
+  mod_scale, mod_scale_shift; every pilot chained to its continuum eval. ~20 h of node205, ~52 h of node206 (estimate).
+- Comparison protocol for the continuum: PMC val ppl vs params at the 6 untrained 1/16 widths in (0.5, 1) and on the
+  Mix'n'Match budgets, against the anchors' ppl (must not get worse) and against levels5/grid9 (trained in-between
+  widths). Then the best method goes to Stage 2 and the medical benchmarks.

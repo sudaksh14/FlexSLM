@@ -29,22 +29,28 @@ class Linear(Module):
         self.max_out_size = self.out_sizes[-1]
 
         self.level = self.max_level()
+        # (in, out) widths that replace in_sizes/out_sizes[level] when set: any prefix
+        # width, not only a trained level (FlexLLaMA.set_widths). set_level_use clears it.
+        self.dims_override = None
         self.linear = nn.Linear(
             self.max_in_size, self.max_out_size, *args, **kwargs)
 
+    def current_dims(self) -> tuple[int, int]:
+        return self.dims_override or (self.in_sizes[self.level], self.out_sizes[self.level])
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        weight_part = self.linear.weight[
-            :self.out_sizes[self.level],
-            :self.in_sizes[self.level]]
+        in_size, out_size = self.current_dims()
+        weight_part = self.linear.weight[:out_size, :in_size]
         bias_part = None
         if self.linear.bias is not None:
-            bias_part = self.linear.bias[:self.out_sizes[self.level]]
+            bias_part = self.linear.bias[:out_size]
         return F.linear(x, weight_part, bias_part)
 
     def set_level_use(self, level: int) -> None:
         assert (level >= 0)
         assert (level <= self.max_level())
         self.level = level
+        self.dims_override = None
 
     def current_level(self) -> int:
         return self.level

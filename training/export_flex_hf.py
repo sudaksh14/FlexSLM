@@ -38,6 +38,21 @@ def flexllama_level_state_dict(model, level: int) -> dict:
         sd[f"{pfx}.post_attention_layernorm.weight"] = block.post_attention_layernorm.make_base_copy().weight
         for proj in ("gate_proj", "up_proj", "down_proj"):
             sd[f"{pfx}.mlp.{proj}.weight"] = getattr(block.mlp, proj).make_base_copy().weight
+        # LLaMaFlex modulation (networks.flexllama.WidthModulation): the scale folds exactly
+        # into the output rows of o_proj / down_proj; a shift would need biases that Qwen3's
+        # MLP does not have, so a shift-trained model cannot be exported to plain Qwen3.
+        if getattr(block, "attn_mod", None) is not None:
+            fh, fa, fm_ = block.width_fracs()
+            for mod, key, frac in ((block.attn_mod, f"{pfx}.self_attn.o_proj.weight", fa),
+                                   (block.mlp_mod, f"{pfx}.mlp.down_proj.weight", fm_)):
+                if fh >= 1 and frac >= 1:
+                    continue  # the full width is never modulated
+                w = sd[key]
+                with torch.no_grad():
+                    scale, shift = mod.vectors(fh, frac, w.shape[0])
+                if shift is not None and shift.abs().max() > 0:
+                    raise NotImplementedError("modulation='scale_shift' cannot be exported to Qwen3 (no MLP bias)")
+                sd[key] = w * scale.to(w.dtype)[:, None]
     if model.config.tie_embeddings:
         sd["lm_head.weight"] = sd["model.embed_tokens.weight"]
     else:

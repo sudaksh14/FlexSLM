@@ -194,9 +194,12 @@ class MemOptFlexLMKDTrainer(_MemOptMixin, LevelWeightingMixin, FlexLMKDTrainer):
         mb = getattr(self.training_context, "micro_batch_size", None) or bsz
         for lo in range(0, bsz, mb):
             mb_ids = input_ids[lo:lo + mb]
-            # Teacher forward, no grad, once per micro-batch (shared by all levels)
-            with torch.no_grad():
-                teacher_rows = self._teacher(mb_ids).logits[:, :-1].reshape(-1, vocab_size)
+            # Teacher forward, no grad, once per micro-batch (shared by all levels). With
+            # kd_lambda 0 (CE only: pilot kd0, teacher correction) the teacher is never loaded.
+            teacher_rows = None
+            if kd_lambda > 0:
+                with torch.no_grad():
+                    teacher_rows = self._teacher(mb_ids).logits[:, :-1].reshape(-1, vocab_size)
 
             for i in levels:
                 self.submodel.set_level_use(i)
@@ -207,15 +210,17 @@ class MemOptFlexLMKDTrainer(_MemOptMixin, LevelWeightingMixin, FlexLMKDTrainer):
                 for start in range(0, n_rows, chunk):
                     end = min(start + chunk, n_rows)
                     s = proxy[start:end]
-                    t = teacher_rows[start:end]
                     # sum/n_total reproduces cross_entropy(reduction='mean') and
                     # kl_div(reduction='batchmean') over the whole batch, chunk by chunk.
                     ce_chunk = F.cross_entropy(s, targets[start:end], reduction="sum") / n_total
-                    kl_chunk = F.kl_div(
-                        F.log_softmax(s / T, dim=-1),
-                        F.softmax(t / T, dim=-1),
-                        reduction="sum",
-                    ) / n_total * (T ** 2)
+                    if teacher_rows is None:
+                        kl_chunk = torch.zeros((), device=s.device)
+                    else:
+                        kl_chunk = F.kl_div(
+                            F.log_softmax(s / T, dim=-1),
+                            F.softmax(teacher_rows[start:end] / T, dim=-1),
+                            reduction="sum",
+                        ) / n_total * (T ** 2)
                     if training:
                         chunk_loss = (1 - kd_lambda) * ce_chunk + kd_lambda * kl_chunk
                         (chunk_loss * w if w != 1.0 else chunk_loss).backward()

@@ -115,6 +115,8 @@ class Stage1Context(FlexTrainingContext):
     level_weights_fixed: tuple = None
     dwa_window: int = 50
     dwa_temperature: float = 2.0
+    anchor_levels: tuple = None
+    continuum_lr: float = 1e-3
 
     def __init__(self, train_tokens=S1_PILOT_TOKENS, data_dir=PMC_DATA_DIR, max_seq_length=1024,
                  global_batch_size=32, kd_lambda=0.5, kd_temperature=2.0, teacher_hf_model="Qwen/Qwen3-1.7B",
@@ -122,6 +124,7 @@ class Stage1Context(FlexTrainingContext):
                  warmup_ratio=0.01, activation_checkpointing=True, loss_chunk_size=1024,
                  micro_batch_size=4, level_weighting="none", level_weight_lr=1e-2, level_weight_ema=0.9,
                  level_weights_fixed=None, dwa_window=50, dwa_temperature=2.0,
+                 anchor_levels=None, continuum_lr=1e-3,
                  epochs=1, patience=1000, **kwargs):
         loader = functools.partial(load_pmc_memmap, data_dir=data_dir, max_seq_length=max_seq_length,
                                    global_batch_size=global_batch_size, train_tokens=train_tokens)
@@ -147,9 +150,12 @@ class Stage1Context(FlexTrainingContext):
         self.level_weights_fixed = tuple(level_weights_fixed) if level_weights_fixed else None
         self.dwa_window = dwa_window
         self.dwa_temperature = dwa_temperature
+        self.anchor_levels = tuple(anchor_levels) if anchor_levels else None
+        self.continuum_lr = continuum_lr
 
     def make_optimizer(self, model):
-        return adamw(model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        return adamw(model.parameters(), lr=self.lr, weight_decay=self.weight_decay,
+                     model=model, continuum_lr=self.continuum_lr)
 
     def make_step_scheduler(self, optimizer, total_steps: int):
         return warmup_cosine_scheduler(optimizer, total_steps, self.warmup_ratio)
@@ -207,19 +213,49 @@ S1_PILOT_ARMS = [
     # paired with order_taylor and order_taylor_lr2e-4 (clip 1.0 like them).
     ("order_minitron", dict(ordering="minitron")),
     ("order_minitron_lr2e-4", dict(ordering="minitron", lr=2e-4)),
+    # Round 3 (2026-11-12): KD from Minitron / Llama-3.1-Minitron. kd0 = CE only (is KD
+    # from the uncorrected teacher useful at all?); T1 = Minitron's best temperature;
+    # *_corrected = KD from Qwen3-1.7B after 20M tokens of PMC (teacher correction,
+    # s1.qwen3_1p7b.teacher_correction).
+    ("kd0", dict(kd_lambda=0.0)),
+    ("T1", dict(kd_temperature=1.0)),
+    ("kd_corrected", dict(teacher_hf_model=None)),           # filled in below (needs the export path)
+    ("kd1_corrected", dict(kd_lambda=1.0, teacher_hf_model=None)),
+    # Continuum of widths (methods 2 and 3; methods 1 and 4 are evaluation only, on any
+    # checkpoint: eval/eval_continuum.py). Anchors 0.5 / 0.75 / 1.0 every step + one random
+    # width of the 1/16 grid (Flextron-style random sub-model) at ~1.33x the step cost.
+    ("grid9_anchors_plus1", dict(fractions=FRACTIONS_9, anchor_levels=(0, 4, 8), num_levels_per_step=4)),
+    # Per-width RMSNorm offsets (switchable norms) and LLaMaFlex modulation, on the 3 base
+    # levels; intermediate widths are interpolated (offsets) or embedded (modulation).
+    ("level_norms", dict(level_norms=True)),
+    ("mod_scale", dict(modulation="scale")),
+    ("mod_scale_shift", dict(modulation="scale_shift")),
 ]
 
 
+# Teacher correction (Llama-3.1-Minitron): the Stage-1 KD teacher fine-tuned on the
+# distillation data (PMC) first. Full Qwen3-1.7B, one level, CE only, 20M tokens, lr 2e-5
+# (gentle: Minitron uses 1/5 of the pretraining peak), no clipping (see the SFT finding).
+CORRECTED_TEACHER_CONFIG = "s1.qwen3_1p7b.teacher_correction"
+CORRECTED_TEACHER_1P7B = os.path.join("hf_export", utils.make_str_filename_safe(f"flexllama,{CORRECTED_TEACHER_CONFIG}"),
+                                      "level0")
+# Width-range ablation for the final experiments only (user, 2026-11-12): levels down to 0.25.
+FRACTIONS_025 = (0.25, 0.5, 0.75, 1.0)
+
+
 def make_stage1(train_tokens: int, wandb_project_name: str, ordering: str = "none",
-                fractions=(0.5, 0.75, 1.0), **overrides) -> TrainerBuilder:
+                fractions=(0.5, 0.75, 1.0), preset: str = "qwen3-0.6b", level_norms: bool = False,
+                modulation: str = None, **overrides) -> TrainerBuilder:
     """Qwen3-0.6B with GQA-preserving levels at hidden fractions 0.5 / 0.75 / 1.0
     (the paper's three levels), KD from the frozen Qwen3-1.7B. ordering (M1, see
     training/importance_order.ORDERINGS) picks the warm-start checkpoint: "none" is
     Hugging Face Qwen3-0.6B, the others the checkpoints importance_order.py writes."""
     from config.experiments import make_flexllama_warmstart_kd
     from training.importance_order import start_weights
-    model_config = make_flexllama_warmstart_kd("qwen3-0.6b", fractions=tuple(fractions)).model_config
-    model_config = dataclasses.replace(model_config, pretrained_hf_model=start_weights(ordering))
+    model_config = make_flexllama_warmstart_kd(preset, fractions=tuple(fractions)).model_config
+    hf_start = start_weights(ordering) if preset == "qwen3-0.6b" else model_config.pretrained_hf_model
+    model_config = dataclasses.replace(model_config, pretrained_hf_model=hf_start,
+                                       level_norms=level_norms, modulation=modulation)
     kwargs = dict(train_tokens=train_tokens, gradient_clip_val=1.0, seed=0,
                   wandb_project_name=wandb_project_name)
     kwargs.update(overrides)
@@ -231,8 +267,16 @@ def register_stage1_configs(configs: dict) -> None:
     configs load the Stage-1 result)."""
     flex = configs["flexllama"]
     for arm, overrides in S1_PILOT_ARMS:
+        overrides = dict(overrides)
+        if "teacher_hf_model" in overrides and overrides["teacher_hf_model"] is None:
+            overrides["teacher_hf_model"] = CORRECTED_TEACHER_1P7B
         flex[f"s1.qwen3_0p6b.pilot.{arm}"] = make_stage1(
             S1_PILOT_TOKENS, f"MedNest_s1_pilot_{arm}", **overrides)
+    flex[CORRECTED_TEACHER_CONFIG] = make_stage1(
+        S1_PILOT_TOKENS, "MedNest_s1_teacher_correction", preset="qwen3-1.7b-gqa", fractions=(1.0,),
+        kd_lambda=0.0, lr=2e-5, gradient_clip_val=None)
+    flex["s1.qwen3_0p6b.full.w025"] = make_stage1(S1_FULL_TOKENS, "MedNest_s1_full_w025",
+                                                  ordering=FINAL_ORDERING, fractions=FRACTIONS_025)
     flex["s1.qwen3_0p6b.full"] = make_stage1(S1_FULL_TOKENS, "MedNest_s1_full", ordering=FINAL_ORDERING)
     # A1: the final recipe without importance ordering (Stage 2: ...nested.no_order). Only
     # meaningful if the pilots choose an ordering; if FINAL_ORDERING stays "none", A1 is

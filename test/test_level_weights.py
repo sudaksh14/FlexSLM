@@ -276,14 +276,19 @@ def test_pmc_memmap_loader(tmp_path, monkeypatch):
 
 def test_stage1_and_stage2_configs_register():
     from training.run_experiment import resolve_from_str
-    from training.stage1 import S1_FULL_TOKENS, S1_PILOT_ARMS, S1_PILOT_TOKENS, FlexLMStage1Trainer
+    from training.stage1 import (CORRECTED_TEACHER_1P7B, S1_FULL_TOKENS, S1_PILOT_ARMS, S1_PILOT_TOKENS,
+                                 FlexLMStage1Trainer)
     for arm, overrides in S1_PILOT_ARMS:
         b = resolve_from_str(f"flexllama,s1.qwen3_0p6b.pilot.{arm}")
         assert b.training_method is FlexLMStage1Trainer
         c = b.training_context
-        assert c.train_tokens == S1_PILOT_TOKENS and c.teacher_hf_model == "Qwen/Qwen3-1.7B"
+        assert c.train_tokens == S1_PILOT_TOKENS
+        corrected = overrides.get("teacher_hf_model", "x") is None  # placeholder for the corrected teacher
+        assert c.teacher_hf_model == (CORRECTED_TEACHER_1P7B if corrected else "Qwen/Qwen3-1.7B"), arm
         for k, v in overrides.items():
-            if k not in ("ordering", "fractions"):  # model-side, checked below
+            if k in ("level_norms", "modulation"):
+                assert getattr(b.model_config, k) == v, (arm, k)
+            elif k not in ("ordering", "fractions", "teacher_hf_model"):  # model-side, checked below
                 assert getattr(c, k) == v, (arm, k)
         if "fractions" not in overrides:
             assert list(b.model_config.hidden_dims) == [512, 768, 1024]

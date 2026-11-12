@@ -20,13 +20,30 @@ class _RMSNormBase(nn.Module):
         return x / rms * self.weight
 
 
+def _interp_rows(rows: torch.Tensor, widths: list, d: int) -> torch.Tensor:
+    """rows[i] belongs to width widths[i] (increasing). The row for width d: exact at a
+    trained width, linear in d between two, clamped outside [widths[0], widths[-1]]."""
+    if d <= widths[0]:
+        return rows[0]
+    if d >= widths[-1]:
+        return rows[-1]
+    for i in range(len(widths) - 1):
+        lo, hi = widths[i], widths[i + 1]
+        if d == lo:
+            return rows[i]
+        if lo < d < hi:
+            t = (d - lo) / (hi - lo)
+            return rows[i] * (1 - t) + rows[i + 1] * t
+    return rows[-1]
+
+
 class RMSNorm(Module):
     """
     Flexible RMSNorm. Stores a single weight vector at max hidden_dim
     and slices to hidden_dims[level] on each forward pass.
     """
 
-    def __init__(self, hidden_dims: Iterable[int], eps: float = 1e-5):
+    def __init__(self, hidden_dims: Iterable[int], eps: float = 1e-5, level_norms: bool = False):
         super().__init__()
         hidden_dims = list(hidden_dims)
         assert len(hidden_dims) > 0
@@ -35,16 +52,34 @@ class RMSNorm(Module):
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(hidden_dims[-1]))
         self.level = self.max_level()
+        self.dim_override = None  # any prefix width (FlexLLaMA.set_widths); cleared by set_level_use
+        # Per-width norm weights (switchable norms of slimmable networks): level l uses
+        # weight + level_delta[l]. Zero-initialised, so training starts from the shared
+        # weight. A width between two trained levels interpolates their deltas linearly
+        # in the width; below the smallest level it uses the smallest level's delta.
+        self.level_norms = level_norms
+        if level_norms:
+            assert all(a < b for a, b in zip(hidden_dims, hidden_dims[1:])), "level_norms needs increasing widths"
+            self.level_delta = nn.Parameter(torch.zeros(len(hidden_dims), hidden_dims[-1]))
+
+    def current_dim(self) -> int:
+        return self.dim_override or self.hidden_dims[self.level]
+
+    def effective_weight(self) -> torch.Tensor:
+        d = self.current_dim()
+        if not self.level_norms:
+            return self.weight[:d]
+        return self.weight[:d] + _interp_rows(self.level_delta, self.hidden_dims, d)[:d]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        d = self.hidden_dims[self.level]
-        w = self.weight[:d]
+        w = self.effective_weight()
         rms = x.pow(2).mean(-1, keepdim=True).add(self.eps).sqrt()
         return x / rms * w
 
     def set_level_use(self, level: int) -> None:
         assert 0 <= level <= self.max_level()
         self.level = level
+        self.dim_override = None
 
     def current_level(self) -> int:
         return self.level
@@ -57,8 +92,7 @@ class RMSNorm(Module):
         return _RMSNormBase
 
     def copy_to_base(self, dest: _RMSNormBase) -> None:
-        d = self.hidden_dims[self.level]
-        dest.weight.data = self.weight.data[:d].clone()
+        dest.weight.data = self.effective_weight().detach().clone()
 
     def load_from_base(self, src: _RMSNormBase) -> None:
         d = self.hidden_dims[self.level]

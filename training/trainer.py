@@ -201,14 +201,32 @@ def check_level_sampling(level_sampling: str) -> None:
         raise ValueError(f"level_sampling must be one of {LEVEL_SAMPLING}, got {level_sampling!r}")
 
 
-def adamw(params, lr: float, weight_decay: float) -> torch.optim.AdamW:
+def adamw(params, lr: float, weight_decay: float, model=None, continuum_lr: float = None) -> torch.optim.AdamW:
     """AdamW with the fused CUDA kernel when every parameter is on the GPU (Lightning
     builds the optimizer after moving the model), the default implementation otherwise
-    (CPU tests). Same algorithm and state format; results differ only by rounding."""
-    params = list(params)
+    (CPU tests). Same algorithm and state format; results differ only by rounding.
+    With model and continuum_lr: the continuum parameters (per-width norm offsets
+    `level_delta`, modulation nets `attn_mod` / `mlp_mod`) get their own group at
+    continuum_lr, no weight decay (LLaMaFlex trains its modulation nets at a much higher
+    lr than the backbone)."""
+    if model is not None and continuum_lr is not None:
+        extra = [p for n, p in model.named_parameters() if _is_continuum_param(n)]
+        ids = {id(p) for p in extra}
+        base = [p for p in model.parameters() if id(p) not in ids]
+        groups = [dict(params=base)] + ([dict(params=extra, lr=continuum_lr, weight_decay=0.0)] if extra else [])
+        params = base + extra
+    else:
+        params = list(params)
+        groups = params
     fused = torch.cuda.is_available() and all(p.is_cuda for p in params)
-    print(f"[optim] AdamW lr {lr} weight_decay {weight_decay} fused {fused}", flush=True)
-    return torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay, fused=fused or None)
+    n_extra = sum(p.numel() for g in groups[1:] for p in g["params"]) if groups is not params else 0
+    print(f"[optim] AdamW lr {lr} weight_decay {weight_decay} fused {fused}"
+          + (f" continuum params {n_extra:,} at lr {continuum_lr}" if n_extra else ""), flush=True)
+    return torch.optim.AdamW(groups, lr=lr, weight_decay=weight_decay, fused=fused or None)
+
+
+def _is_continuum_param(name: str) -> bool:
+    return name.endswith("level_delta") or ".attn_mod." in name or ".mlp_mod." in name
 
 
 def warmup_cosine_scheduler(optimizer, total_steps: int, warmup_ratio: float):
@@ -252,7 +270,11 @@ class FlexLMTrainer(FlexModelTrainer):
         if stage != "train" or num_sample is None or num_sample >= len(all_levels):
             return all_levels
 
-        required = {all_levels[0], all_levels[-1]}
+        # anchor_levels: always trained (e.g. the deployment widths 0.5 / 0.75 / 1.0 of a
+        # dense 9-level grid); the remaining slots are random levels in between (Flextron's
+        # random sub-models, here on top of fixed anchors). Default: min and max.
+        anchors = getattr(self.training_context, "anchor_levels", None)
+        required = set(anchors) if anchors else {all_levels[0], all_levels[-1]}
         pool = [l for l in all_levels if l not in required]
         num_extra = max(0, num_sample - len(required))
         # Seeded by (seed, step) like "single": every DDP rank trains the same levels

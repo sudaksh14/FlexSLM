@@ -75,6 +75,9 @@ class RoPEAttention(nn.Module):
         q_dims = [n * hd for n, hd in zip(num_heads, head_dims)]
         kv_dims = [kv * hd for kv, hd in zip(num_kv_heads, head_dims)]
         self.q_dims = q_dims
+        # Query-head count that replaces num_heads_list[level] when set (FlexLLaMA.set_widths
+        # also sets the projections' widths); KV heads follow the max level's GQA ratio.
+        self.heads_override = None
 
         # LLaMA convention: no bias anywhere. Qwen2 convention: q/k/v carry bias,
         # o_proj does not - qkv_bias selects between the two. Under the original
@@ -105,14 +108,31 @@ class RoPEAttention(nn.Module):
             self.register_buffer(f'cos_{level}', emb.cos())
             self.register_buffer(f'sin_{level}', emb.sin())
 
+    def override_head_counts(self, num_heads: int) -> tuple:
+        ratio = self.num_heads_list[-1] // self.num_kv_heads_list[-1]
+        assert len(set(self.head_dims)) == 1, "width overrides need one head_dim on every level"
+        assert num_heads % ratio == 0 and 0 < num_heads <= self.num_heads_list[-1], \
+            f"{num_heads} query heads: must be a positive multiple of the GQA ratio {ratio}"
+        return num_heads, num_heads // ratio
+
+    def current_num_heads(self) -> int:
+        if self.heads_override is not None and self.q_proj.dims_override is not None:
+            return self.heads_override
+        return self.num_heads_list[self.q_proj.current_level()]
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [B, S, hidden_dim]
         B, S, _ = x.shape
         level = self.q_proj.current_level()
-        num_heads = self.num_heads_list[level]
-        num_kv_heads = self.num_kv_heads_list[level]
-        head_dim = self.head_dims[level]
-        q_dim = self.q_dims[level]
+        if self.heads_override is not None and self.q_proj.dims_override is not None:
+            num_heads, num_kv_heads = self.override_head_counts(self.heads_override)
+            head_dim = self.head_dims[-1]
+            q_dim = num_heads * head_dim
+        else:
+            num_heads = self.num_heads_list[level]
+            num_kv_heads = self.num_kv_heads_list[level]
+            head_dim = self.head_dims[level]
+            q_dim = self.q_dims[level]
 
         q = self.q_proj(x).view(B, S, num_heads, head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, S, num_kv_heads, head_dim).transpose(1, 2)

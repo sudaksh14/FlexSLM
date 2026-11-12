@@ -24,7 +24,11 @@ class Embedding(Module):
         self._kwargs = kwargs
 
         self.level = self.max_level()
+        self.dim_override = None  # any prefix width (FlexLLaMA.set_widths); cleared by set_level_use
         self.embedding = nn.Embedding(vocab_size, hidden_dims[-1], **kwargs)
+
+    def current_dim(self) -> int:
+        return self.dim_override or self.hidden_dims[self.level]
 
     @property
     def weight(self) -> torch.Tensor:
@@ -32,11 +36,12 @@ class Embedding(Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.embedding(x)                          # [B, S, max_hidden_dim]
-        return out[..., :self.hidden_dims[self.level]]   # [B, S, hidden_dim[level]]
+        return out[..., :self.current_dim()]             # [B, S, hidden_dim[level]]
 
     def set_level_use(self, level: int) -> None:
         assert 0 <= level <= self.max_level()
         self.level = level
+        self.dim_override = None
 
     def current_level(self) -> int:
         return self.level
