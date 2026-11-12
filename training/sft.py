@@ -42,15 +42,21 @@ _QWEN3_FAITHMED = dict(
     max_seq_length=3072, activation_checkpointing=True)
 
 # Corrected setup for the paper runs (2026-11-09): the GQA-preserving level
-# builder (presets with a head_dim), gradient-norm clipping at 1.0 (the HF
-# Trainer / LLaMA-Factory default that FaithMed's recipe runs with; the runs
-# above did not clip) and one fixed seed. The effective batch is 32 sequences,
+# builder (presets with a head_dim), NO gradient clipping, and one fixed seed.
+# Clipping at 1.0 (the HF Trainer default) was tried first and is the cause of the
+# weak T1 teacher (job 28083, avg 30.6): raw gradient norms are 300-400 at the
+# start and 3-15 later, so every step was clipped, Adam saw constant-norm
+# gradients and the weights moved 2.5-3x further than unclipped. Unclipped (E_A,
+# job 28131): avg 36.8 and the same weight change as the student's run (37.7). The effective batch is 32 sequences,
 # i.e. batch_size x number of GPUs: 16 x 2 on node205 (2x A40).
 # micro_batch_size 8: job 28075 (1.7B, 16 x 3,072 per GPU in one pass) ran out of
 # memory at step 731 (43.5 GB of 44.7 GB on an A40); two passes of 8 give the same step.
-_PAPER = dict(_QWEN3_FAITHMED, batch_size=16, micro_batch_size=8, gradient_clip_val=1.0, seed=0)
+_PAPER = dict(_QWEN3_FAITHMED, batch_size=16, micro_batch_size=8, gradient_clip_val=None, seed=0)
+# Stage-2 teacher: the E_A export. E_A is exactly sft.paper.qwen3_1p7b_teacher with
+# _PAPER's (unclipped) settings, so T1 is not retrained; the clipped T1 export (28083)
+# stays under the T1 name for reference only.
 _FT_TEACHER_1P7B = os.path.join(
-    "hf_export", utils.make_str_filename_safe("flexllama,sft.paper.qwen3_1p7b_teacher"), "level2")
+    "hf_export", utils.make_str_filename_safe("flexllama,sft.diag.qwen3_1p7b_teacher.noclip"), "level2")
 # Stage 2 (nested SFT of Qwen3-0.6B): the paper schedule, KD (lambda 0.5, T 2)
 # from the fine-tuned 1.7B, all levels every step. hf_preset None: the model and
 # its start weights come from the Stage-1 config named in SFT_RUNS.

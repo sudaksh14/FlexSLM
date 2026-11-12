@@ -198,6 +198,11 @@ S1_PILOT_ARMS = [
     ("levels5", dict(fractions=FRACTIONS_5)),                                   # all 5 per step
     ("levels5_sw3", dict(fractions=FRACTIONS_5, num_levels_per_step=3)),        # min, max + 1 random
     ("grid9_sw3", dict(fractions=FRACTIONS_9, num_levels_per_step=3)),          # dense grid, 3 per step
+    # Round 2 (2026-11-12): Stage 1 clips on every step too (grad norm 5-15 at the end vs
+    # 1.0), and the two best single changes (Taylor ordering, lr 2e-4) were never combined.
+    ("noclip", dict(gradient_clip_val=None)),
+    ("order_taylor_lr2e-4", dict(ordering="taylor", lr=2e-4)),
+    ("order_taylor_lr2e-4_noclip", dict(ordering="taylor", lr=2e-4, gradient_clip_val=None)),
 ]
 
 
