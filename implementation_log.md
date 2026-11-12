@@ -607,3 +607,11 @@ max_seq 3072):
 - Comparison protocol for the continuum: PMC val ppl vs params at the 6 untrained 1/16 widths in (0.5, 1) and on the
   Mix'n'Match budgets, against the anchors' ppl (must not get worse) and against levels5/grid9 (trained in-between
   widths). Then the best method goes to Stage 2 and the medical benchmarks.
+- **DAS-6 back (2026-11-12 ~19:00), queue submitted** (`jobs/queue_2026-11-12.ids`): PMC ppl Qwen3-1.7B 28156, 0.6B
+  28157; continuum evals base.init 28158, base 28159, levels5 28160, levels5_sw3 28161, grid9_sw3 28162, order_taylor
+  28163, lr2e-4 28164; Minitron ordering 28165 -> timing taylor 28166 -> minitron_b8 28167 (node207); teacher correction
+  28168 -> export 28169 -> PMC ppl 28170; pilots (-> continuum eval): kd0 28171 (28172), T1 28173 (28174), kd_corrected
+  28175 (28176), kd1_corrected 28177 (28178), order_minitron 28179 (28180), order_minitron_lr2e-4 28181 (28182) on
+  node205; grid9_anchors_plus1 28183 (28184), level_norms 28185 (28186), mod_scale 28187 (28188), mod_scale_shift 28189
+  (28190) on node206. The outage interrupted B1 28150 (step 323/1044) and pilot noclip 28155; Slurm requeued both
+  (resume from last.ckpt); 28151-28154 still queued behind them.
