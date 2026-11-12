@@ -203,6 +203,10 @@ S1_PILOT_ARMS = [
     ("noclip", dict(gradient_clip_val=None)),
     ("order_taylor_lr2e-4", dict(ordering="taylor", lr=2e-4)),
     ("order_taylor_lr2e-4_noclip", dict(ordering="taylor", lr=2e-4, gradient_clip_val=None)),
+    # Activation-magnitude ordering of Minitron / Flextron / LLaMaFlex (modelopt mcore_minitron),
+    # paired with order_taylor and order_taylor_lr2e-4 (clip 1.0 like them).
+    ("order_minitron", dict(ordering="minitron")),
+    ("order_minitron_lr2e-4", dict(ordering="minitron", lr=2e-4)),
 ]
 
 

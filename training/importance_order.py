@@ -56,9 +56,12 @@ import torch.nn.functional as F
 #   "hidden_act" residual channels by mean |x| at the RMSNorm inputs (Minitron-style),
 #                MLP channels and KV groups in the original order
 #   "taylor"     everything by the Taylor score below
-ORDERINGS = ("none", "hidden_act", "taylor")
+#   "minitron"   everything by activation magnitude, exactly as NVIDIA Model Optimizer's
+#                mcore_minitron (Minitron, Flextron, LLaMaFlex), see collect_minitron_importance
+ORDERINGS = ("none", "hidden_act", "taylor", "minitron")
 ORDERED_CHECKPOINTS = {"taylor": os.path.join("hf_export", "qwen3-0.6b.taylor"),
-                       "hidden_act": os.path.join("hf_export", "qwen3-0.6b.hidden_act")}
+                       "hidden_act": os.path.join("hf_export", "qwen3-0.6b.hidden_act"),
+                       "minitron": os.path.join("hf_export", "qwen3-0.6b.minitron")}
 ORDERED_QWEN3_0P6B = ORDERED_CHECKPOINTS["taylor"]
 # Ordering of the final recipe (s1.qwen3_0p6b.full and the Stage-2 runs that need a start
 # checkpoint). Provisional: set from the pilots s1.qwen3_0p6b.pilot.{base,order_*}.
@@ -181,6 +184,62 @@ def collect_hidden_activation(model, batches) -> torch.Tensor:
     return (total / max(1, tokens)).cpu()
 
 
+@torch.no_grad()
+def collect_minitron_importance(model, batches) -> dict:
+    """Activation-magnitude scores, forward passes only, ported from NVIDIA Model Optimizer
+    (modelopt/torch/prune/plugins/mcore_minitron.py; Muralidharan et al. 2024, used by
+    Flextron and LLaMaFlex). Aggregation everywhere: mean of |x| over the sequence, then
+    L2 over the calibration sequences (Minitron's best (batch L2, sequence mean)).
+      * MLP channel: input of down_proj.
+      * head: per channel of the o_proj input, then L2 over the head's head_dim channels.
+        Minitron keeps the KV groups and ranks query heads inside each group; MedNest
+        levels drop whole KV groups, so a group scores the L2 over all its channels
+        (modelopt's commented-out group_importance).
+      * residual channel: OUTPUT of input_layernorm and post_attention_layernorm
+        (normalised and scaled, unlike hidden_act, which reads the raw norm inputs),
+        L2 per site, summed over sites; the final norm is not used (as in modelopt)."""
+    cfg = model.config
+    n_heads, n_kv = cfg.num_attention_heads, cfg.num_key_value_heads
+    head_dim = getattr(cfg, "head_dim", None) or cfg.hidden_size // n_heads
+    layers = _layers(model)
+    device = next(model.parameters()).device
+
+    def acc(buf, x):  # [b, t, c] -> buf [c] += sum_b (mean_t |x|)^2; returns None (keeps outputs)
+        buf.add_(x.float().abs().mean(dim=1).pow(2).sum(dim=0))
+    mlp = [torch.zeros(cfg.intermediate_size, device=device) for _ in layers]
+    attn = [torch.zeros(n_heads * head_dim, device=device) for _ in layers]
+    hidden = [torch.zeros(cfg.hidden_size, device=device) for _ in range(2 * len(layers))]
+    handles = []
+    for idx, layer in enumerate(layers):
+        handles.append(layer.mlp.down_proj.register_forward_pre_hook(
+            lambda _m, args, idx=idx: acc(mlp[idx], args[0])))
+        handles.append(layer.self_attn.o_proj.register_forward_pre_hook(
+            lambda _m, args, idx=idx: acc(attn[idx], args[0])))
+        for k, norm in enumerate((layer.input_layernorm, layer.post_attention_layernorm)):
+            handles.append(norm.register_forward_hook(
+                lambda _m, _a, out, site=2 * idx + k: acc(hidden[site], out)))
+    was_training = model.training
+    model.eval()
+    tokens = 0
+    try:
+        for batch in batches:
+            model(input_ids=batch.to(device), use_cache=False)
+            tokens += batch.numel()
+    finally:
+        for h in handles:
+            h.remove()
+        model.train(was_training)
+    if tokens == 0:
+        raise ValueError("no calibration tokens were processed")
+    group = n_heads // n_kv
+    return dict(
+        mlp=[s.sqrt().cpu() for s in mlp],
+        groups=[s.view(n_kv, group * head_dim).sum(1).sqrt().cpu() for s in attn],
+        hidden=torch.stack([s.sqrt() for s in hidden]).sum(0).cpu(),
+        tokens=tokens,
+    )
+
+
 def _residual_norms(model):
     norms = []
     for layer in _layers(model):
@@ -299,8 +358,15 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=torch.float32).to(device)
     calib = calibration_batches(args.data_dir, args.calib_seqs, args.seq_len, args.batch_size)
-    if args.scheme == "taylor":
-        imp = collect_taylor_importance(model, calib, skip_first_token=args.skip_first_token)
+    # Scoring cost (the only part that differs between schemes; permutation, check and
+    # ppl evaluation are the same for all): wall time and peak GPU memory.
+    if device == "cuda":
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+    t_score = time.time()
+    if args.scheme in ("taylor", "minitron"):
+        imp = (collect_taylor_importance(model, calib, skip_first_token=args.skip_first_token)
+               if args.scheme == "taylor" else collect_minitron_importance(model, calib))
         perm = permutation_from_importance(imp)
     else:  # hidden_act: only the residual channels move
         hidden = collect_hidden_activation(model, calib)
@@ -309,6 +375,12 @@ def main():
         perm = dict(mlp=[torch.arange(model.config.intermediate_size)] * n_layers,
                     groups=[torch.arange(model.config.num_key_value_heads)] * n_layers,
                     hidden=torch.argsort(hidden, descending=True, stable=True))
+    if device == "cuda":
+        torch.cuda.synchronize()
+    score_seconds = time.time() - t_score
+    score_peak_gb = torch.cuda.max_memory_allocated() / 2**30 if device == "cuda" else float("nan")
+    print(f"[score] scheme {args.scheme}: {score_seconds:.1f} s, peak GPU memory {score_peak_gb:.2f} GB "
+          f"({torch.cuda.get_device_name() if device == 'cuda' else 'cpu'}, batch {args.batch_size})", flush=True)
     check = next(calibration_batches(args.data_dir, 2, 256, 2, seed=99, split="val"))
     diff, scale = permuted_logit_diff(model, perm, check)
     tol = 1e-4 + 1e-4 * scale
@@ -321,7 +393,10 @@ def main():
     model.save_pretrained(args.out)
     AutoTokenizer.from_pretrained(args.model).save_pretrained(args.out)
     torch.save(dict(importance=imp, permutation=perm), os.path.join(args.out, "importance.pt"))
-    meta = dict(source=args.model, method={"taylor": "taylor |x*dL/dx|", "hidden_act": "hidden mean |x| at RMSNorm inputs"}[args.scheme], calib=f"{args.data_dir}/train.bin",
+    meta = dict(source=args.model, method={"taylor": "taylor |x*dL/dx|", "hidden_act": "hidden mean |x| at RMSNorm inputs",
+                             "minitron": "activation magnitude (modelopt mcore_minitron)"}[args.scheme],
+                calib=f"{args.data_dir}/train.bin", score_seconds=round(score_seconds, 1),
+                score_peak_gb=round(score_peak_gb, 2), batch_size=args.batch_size,
                 calib_seqs=args.calib_seqs, seq_len=args.seq_len, skip_first_token=args.skip_first_token,
                 tokens=imp["tokens"], max_logit_diff=diff)
     del model

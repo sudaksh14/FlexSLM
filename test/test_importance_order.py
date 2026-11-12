@@ -111,3 +111,33 @@ def test_hidden_activation_score_and_start_weights():
     assert start_weights("hidden_act") == ORDERED_CHECKPOINTS["hidden_act"]
     with pytest.raises(ValueError):
         start_weights("random")
+
+
+def test_minitron_importance_matches_reference_and_orders():
+    from training.importance_order import collect_minitron_importance
+    model = _qwen3(False)
+    batches = _batches()
+    imp = collect_minitron_importance(model, batches)
+    assert [s.shape for s in imp["mlp"]] == [torch.Size([48])] * 2
+    assert [s.shape for s in imp["groups"]] == [torch.Size([2])] * 2
+    assert imp["hidden"].shape == torch.Size([32]) and imp["tokens"] == 2 * 2 * 12
+    assert all(not m._forward_pre_hooks and not m._forward_hooks for m in model.modules())
+    # Reference for layer 0's MLP: L2 over sequences of the per-sequence mean |down_proj input|.
+    seen = []
+    h = model.model.layers[0].mlp.down_proj.register_forward_pre_hook(lambda _m, a: seen.append(a[0].detach()))
+    with torch.no_grad():
+        for b in batches:
+            model(input_ids=b)
+    h.remove()
+    ref = torch.cat(seen).abs().mean(1).pow(2).sum(0).sqrt()
+    torch.testing.assert_close(imp["mlp"][0], ref, rtol=1e-5, atol=1e-7)
+    # Batching does not change the scores (L2 over sequences, not over batches).
+    singles = [b[i:i + 1] for b in batches for i in range(b.shape[0])]
+    for a, b in zip(imp["mlp"] + imp["groups"] + [imp["hidden"]],
+                    (lambda d: d["mlp"] + d["groups"] + [d["hidden"]])(collect_minitron_importance(model, singles))):
+        torch.testing.assert_close(a, b, rtol=1e-5, atol=1e-7)
+    # Activation scores move with the units: after ordering they are sorted.
+    apply_permutation(model, permutation_from_importance(imp))
+    imp2 = collect_minitron_importance(model, batches)
+    for s in imp2["mlp"] + imp2["groups"] + [imp2["hidden"]]:
+        assert torch.all(s[:-1] >= s[1:] * (1 - 1e-4) - 1e-9)
