@@ -531,3 +531,27 @@ max_seq 3072):
 - Next: read round 2; then set `FINAL_ORDERING` (taylor is the current favourite), lr and clipping of
   `s1.qwen3_0p6b.full` (100M, ~9 h on node205), and run A2 `...nested.no_stage1` (needs FINAL_ORDERING). User
   sign-off needed for the final Stage-1 recipe before the 100M run.
+- **LLaMaFlex / Minitron ordering (user question).** LLaMaFlex (ICLR 2025): no code, no checkpoints, proprietary
+  60.4B-token data; its ordering is one sentence ("accumulated magnitude of activations", citing Flextron + Minitron),
+  no formula, no ablation. Flextron: no code/checkpoints. `NVlabs/Minitron` is README/model cards only (HF checkpoints
+  Minitron-4B/8B). The real implementation is NVIDIA Model Optimizer `modelopt/torch/prune/plugins/mcore_minitron.py`
+  (Megatron only). Its recipe: MLP = down_proj input, head = o_proj input (L2 over head_dim), hidden = OUTPUT of
+  input_layernorm + post_attention_layernorm (L2 per site, summed; no final norm); aggregation mean|x| over sequence,
+  L2 over samples; Minitron paper: 1,024 samples, one-shot, never compared with Taylor/gradient scores. Our
+  `hidden_act` differed (norm inputs, sum |x|, MLP/groups unordered).
+- Implemented `--scheme minitron` (`collect_minitron_importance`, port of modelopt; KV-group score = L2 over all its
+  channels, since our levels drop whole groups while Minitron prunes query heads inside groups). The script now logs
+  `score_seconds` / `score_peak_gb` for every scheme (`[score]` line, ordering.json). New test (matches a manual
+  reference, batch-invariant, ordered model is sorted); 67 local tests pass. Pilot arms `order_minitron` (vs
+  `order_taylor`) and `order_minitron_lr2e-4` (vs `order_taylor_lr2e-4`). Committed, **NOT yet synced/submitted:
+  DAS-6 unreachable (ssh port 22 timeout, 2026-11-12 ~17:40; VPN?).** To run once reachable:
+  ```
+  SSH_AUTH_SOCK=$HOME/.ssh/agent.sock bash scripts/das6/sync.sh
+  # on DAS-6, ~/FlexSLM; all three on node207 in sequence, so the timings are comparable
+  o=$(sbatch --parsable --nodelist=node207 scripts/das6/importance_order.sbatch --scheme minitron --out hf_export/qwen3-0.6b.minitron)
+  t=$(sbatch --parsable --nodelist=node207 --dependency=afterany:$o scripts/das6/importance_order.sbatch --scheme taylor --out /var/scratch/skalra/flexslm/timing/taylor --eval-seqs 0)
+  m=$(sbatch --parsable --nodelist=node207 --dependency=afterany:$t scripts/das6/importance_order.sbatch --scheme minitron --batch-size 8 --out /var/scratch/skalra/flexslm/timing/minitron_b8 --eval-seqs 0)
+  sbatch --time=07:00:00 --dependency=afterok:$o scripts/das6/train.sbatch s1.qwen3_0p6b.pilot.order_minitron
+  sbatch --time=07:00:00 --dependency=afterok:$o scripts/das6/train.sbatch s1.qwen3_0p6b.pilot.order_minitron_lr2e-4
+  ```
+  (calibration = the sbatch default 512 x 512 PMC train tokens, batch 1, same as the Taylor checkpoint 28100.)
