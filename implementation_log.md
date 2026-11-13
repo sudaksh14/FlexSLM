@@ -625,3 +625,35 @@ max_seq 3072):
   11-12). **PMC val ppl (Stage-1 val windows, 640 x 1,024): Qwen3-0.6B 10.11, Qwen3-1.7B (Stage-1 teacher) 7.92.**
   After 20M tokens the base pilot's full width is at 7.54, i.e. **better than its teacher on PMC**: the teacher-correction
   hypothesis holds (pure KD toward a worse teacher pulled L2 to 9.76 in kd1). Corrected teacher: 28168 -> 28170.
+- **User decisions (2026-11-13):** (1) try **II-Medical-8B** as the bigger teacher for the 1.7B backbone (S1), run on
+  **hipster, performance partition**; (2) implement I1 now; (3) A3-in-both-stages: decide after the paper is final
+  (only if time remains); (4) the continuum is NOT a section: show it in the Pareto plot (anchors = dots, untrained /
+  interpolated widths = stars or similar) + a few lines in the method (Sect. 3.4). Keep Stage-1 pilots clipped for now.
+- **I1 implemented**: `Stage1Context.train_levels` (+ `FlexLMStage1Trainer._select_levels`): train and validate one
+  level of the same nested model = the same importance-ordered prefix, alone. Configs `s1.qwen3_0p6b.full.indep_l{0,1}`
+  (100M tokens, same recipe) -> `sft.paper.qwen3_0p6b_indep_l{0,1}` (same Stage-2 schedule/teacher, `train_levels`).
+  New `stage1.FINAL_S1` dict (empty until the pilots decide; never holds `ordering`) shared by full, no_order, w025 and
+  indep_*, so the final-budget runs cannot drift apart. 80 local tests pass.
+- **Hipster** (from the FlexLLaVA hipster launchers): performance = 5 nodes x 8 RTX 6000 Ada 48 GB, 32 CPU/GPU enforced,
+  DefMemPerCPU 3000 MB, max 7 days, busy shared cluster (no --exclusive); capacity = L4 24 GB; `module load cuda/12.9.1`.
+  Env: existing conda `my_env` (py3.9, torch 2.8.0, transformers 4.57.6, lightning 2.5.2, no pytest), used read-only.
+  There is an OLD `~/FlexSLM` clone on hipster (commit b39fbcc, own wandb/jobs from Nov 10): left untouched. Our code
+  goes to **`~/FlexSLM-medbench`** (`scripts/hipster/sync.sh`), heavy files `/scratch/skalra/flexslm` (home 52% full).
+  `scripts/hipster/setup.sh` streams data/pmc_qwen3 + data/medmix_sft and the Qwen3 HF cache from DAS-6 (hipster
+  reaches DAS-6 over ssh) and downloads II-Medical-8B. Job scripts: common.sh, check.sbatch (warm-start + PMC ppl
+  parity with DAS-6 under the newer transformers), evalgen.sbatch, eval_continuum.sbatch.
+- S1 memory plan: 1.7B nested student (fp32 weights + grads + Adam ~27.6 GB) + 8B bf16 teacher (16.4 GB) does not fit
+  48 GB under DDP. Plan: ZeRO-1 (torch ZeroRedundancyOptimizer: Adam state sharded over 4 GPUs, ~34 GB/GPU before
+  activations); Lightning consolidates the optimizer state for checkpoints. Not implemented yet; teacher checks first.
+- Hipster setup done (`scripts/hipster/setup.sh`): data copied byte-exact from DAS-6 (sizes + md5 match; du shows half
+  because of fs compression), Qwen3 cache copied, II-Medical-8B downloaded (Qwen3ForCausalLM, hidden 4096, 36 layers, 8
+  KV heads, untied, vocab 151,936; vocab.json/merges.txt md5-identical to Qwen3-1.7B -> KD-compatible).
+- ZeRO-1 implemented (`zero_optimizer` on Stage1Context / SFTTrainingContext -> torch ZeroRedundancyOptimizer around the
+  same AdamW incl. the continuum group; 2-process gloo test: identical params after 3 steps, full state consolidated on
+  rank 0). 81 local tests pass.
+- Hipster jobs: check 391237 (warm start + PMC ppl parity), II-Medical-8B PMC ppl 391238, II-Medical-8B evalgen 32 tokens
+  391239 -- all PENDING (Priority), estimated start 2026-11-15 17:56. **Scheduler estimates (sbatch --test-only,
+  2026-11-13 ~14:30): 1 L4 on capacity -> 2026-12-02; 4 x RTX 6000 Ada on performance -> 2026-12-22 (after the
+  deadline).** Our fairshare priority is 5; 46 jobs pending on performance, 274 on capacity. => S1 training on hipster
+  is not feasible before 2026-12-15 per the scheduler; needs a user decision (DAS-6 node205 with ZeRO-1 over 2 A40s
+  is the fallback).
