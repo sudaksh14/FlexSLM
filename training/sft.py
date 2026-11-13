@@ -256,6 +256,7 @@ class SFTTrainingContext(FlexTrainingContext):
     # Sequences per forward/backward pass inside one optimizer step (None = whole
     # batch). Exact: losses are normalised over the whole batch.
     micro_batch_size: int = None
+    zero_optimizer: bool = False
 
     def __init__(self, load_from: str, teacher_hf_model: str, tokenizer_name: str,
                  kd_lambda=0.5, kd_temperature=2.0, num_levels_per_step=None,
@@ -264,7 +265,7 @@ class SFTTrainingContext(FlexTrainingContext):
                  warmup_ratio=None, activation_checkpointing=False, train_levels=None,
                  level_weighting="none", level_weight_lr=1e-2, level_weight_ema=0.9,
                  level_weights_fixed=None, dwa_window=50, dwa_temperature=2.0,
-                 level_sampling="sandwich", micro_batch_size=None, **kwargs):
+                 level_sampling="sandwich", micro_batch_size=None, zero_optimizer=False, **kwargs):
         loader = functools.partial(load_qa_sft, data_dir=data_dir, tokenizer_name=tokenizer_name,
                                    batch_size=batch_size, max_seq_length=max_seq_length)
         FlexTrainingContext.__init__(self, loader, patience=patience, epochs=epochs,
@@ -278,6 +279,7 @@ class SFTTrainingContext(FlexTrainingContext):
         self.warmup_ratio = warmup_ratio
         self.activation_checkpointing = activation_checkpointing
         self.train_levels = train_levels
+        self.zero_optimizer = zero_optimizer  # ZeRO-1 (training.trainer.adamw): 1.7B student + 8B teacher
         check_level_weighting(level_weighting, level_weight_lr, level_weight_ema,
                               level_weights_fixed, dwa_window, dwa_temperature)
         check_level_sampling(level_sampling)
@@ -293,7 +295,8 @@ class SFTTrainingContext(FlexTrainingContext):
         self.micro_batch_size = micro_batch_size
 
     def make_optimizer(self, model):
-        return adamw(model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        return adamw(model.parameters(), lr=self.lr, weight_decay=self.weight_decay,
+                     zero=getattr(self, "zero_optimizer", False))
 
     def make_scheduler(self, optimizer):
         # Stepped once per epoch (FlexModelTrainer.on_train_epoch_end).

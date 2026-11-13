@@ -118,6 +118,7 @@ class Stage1Context(FlexTrainingContext):
     anchor_levels: tuple = None
     continuum_lr: float = 1e-3
     train_levels: tuple = None
+    zero_optimizer: bool = False
 
     def __init__(self, train_tokens=S1_PILOT_TOKENS, data_dir=PMC_DATA_DIR, max_seq_length=1024,
                  global_batch_size=32, kd_lambda=0.5, kd_temperature=2.0, teacher_hf_model="Qwen/Qwen3-1.7B",
@@ -125,7 +126,7 @@ class Stage1Context(FlexTrainingContext):
                  warmup_ratio=0.01, activation_checkpointing=True, loss_chunk_size=1024,
                  micro_batch_size=4, level_weighting="none", level_weight_lr=1e-2, level_weight_ema=0.9,
                  level_weights_fixed=None, dwa_window=50, dwa_temperature=2.0,
-                 anchor_levels=None, continuum_lr=1e-3, train_levels=None,
+                 anchor_levels=None, continuum_lr=1e-3, train_levels=None, zero_optimizer=False,
                  epochs=1, patience=1000, **kwargs):
         loader = functools.partial(load_pmc_memmap, data_dir=data_dir, max_seq_length=max_seq_length,
                                    global_batch_size=global_batch_size, train_tokens=train_tokens)
@@ -157,10 +158,11 @@ class Stage1Context(FlexTrainingContext):
         # level of the same nested model, i.e. the same importance-ordered prefix, trained
         # alone; the other weights get no gradient and are never exported for evaluation.
         self.train_levels = tuple(train_levels) if train_levels else None
+        self.zero_optimizer = zero_optimizer
 
     def make_optimizer(self, model):
         return adamw(model.parameters(), lr=self.lr, weight_decay=self.weight_decay,
-                     model=model, continuum_lr=self.continuum_lr)
+                     model=model, continuum_lr=self.continuum_lr, zero=self.zero_optimizer)
 
     def make_step_scheduler(self, optimizer, total_steps: int):
         return warmup_cosine_scheduler(optimizer, total_steps, self.warmup_ratio)

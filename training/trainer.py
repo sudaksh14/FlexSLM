@@ -201,14 +201,19 @@ def check_level_sampling(level_sampling: str) -> None:
         raise ValueError(f"level_sampling must be one of {LEVEL_SAMPLING}, got {level_sampling!r}")
 
 
-def adamw(params, lr: float, weight_decay: float, model=None, continuum_lr: float = None) -> torch.optim.AdamW:
+def adamw(params, lr: float, weight_decay: float, model=None, continuum_lr: float = None,
+          zero: bool = False) -> torch.optim.Optimizer:
     """AdamW with the fused CUDA kernel when every parameter is on the GPU (Lightning
     builds the optimizer after moving the model), the default implementation otherwise
     (CPU tests). Same algorithm and state format; results differ only by rounding.
     With model and continuum_lr: the continuum parameters (per-width norm offsets
     `level_delta`, modulation nets `attn_mod` / `mlp_mod`) get their own group at
     continuum_lr, no weight decay (LLaMaFlex trains its modulation nets at a much higher
-    lr than the backbone)."""
+    lr than the backbone).
+    zero: ZeRO-1, i.e. torch's ZeroRedundancyOptimizer around the same AdamW, when more
+    than one process trains: every rank keeps the Adam state of 1/world of the
+    parameters (same update; Lightning consolidates the state on rank 0 for checkpoints).
+    Needed for the 1.7B nested student next to an 8B teacher on 48 GB GPUs."""
     if model is not None and continuum_lr is not None:
         extra = [p for n, p in model.named_parameters() if _is_continuum_param(n)]
         ids = {id(p) for p in extra}
@@ -220,8 +225,15 @@ def adamw(params, lr: float, weight_decay: float, model=None, continuum_lr: floa
         groups = params
     fused = torch.cuda.is_available() and all(p.is_cuda for p in params)
     n_extra = sum(p.numel() for g in groups[1:] for p in g["params"]) if groups is not params else 0
+    import torch.distributed as dist
+    sharded = zero and dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1
     print(f"[optim] AdamW lr {lr} weight_decay {weight_decay} fused {fused}"
-          + (f" continuum params {n_extra:,} at lr {continuum_lr}" if n_extra else ""), flush=True)
+          + (f" continuum params {n_extra:,} at lr {continuum_lr}" if n_extra else "")
+          + (f" ZeRO-1 over {dist.get_world_size()} ranks" if sharded else ""), flush=True)
+    if sharded:
+        from torch.distributed.optim import ZeroRedundancyOptimizer
+        return ZeroRedundancyOptimizer(groups, optimizer_class=torch.optim.AdamW, lr=lr,
+                                       weight_decay=weight_decay, fused=fused or None)
     return torch.optim.AdamW(groups, lr=lr, weight_decay=weight_decay, fused=fused or None)
 
 
