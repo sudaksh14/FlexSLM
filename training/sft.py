@@ -146,6 +146,12 @@ SFT_RUNS = [
     # A3: no KD in Stage 2 (CE on the answers only).
     ("sft.paper.qwen3_0p6b_nested.no_kd", "s1.qwen3_0p6b.full", dict(_S2,
         kd_lambda=0.0, wandb_project_name="MedNest_s2_no_kd")),
+    # I1: independent baselines, Stage 2 of s1.qwen3_0p6b.full.indep_l{0,1}: the same schedule
+    # and KD teacher as M3, but only that one level is trained (and exported for evaluation).
+    ("sft.paper.qwen3_0p6b_indep_l0", "s1.qwen3_0p6b.full.indep_l0", dict(_S2,
+        train_levels=[0], wandb_project_name="MedNest_i1_indep_l0")),
+    ("sft.paper.qwen3_0p6b_indep_l1", "s1.qwen3_0p6b.full.indep_l1", dict(_S2,
+        train_levels=[1], wandb_project_name="MedNest_i1_indep_l1")),
     # Baseline B2: MatFormer-style nested fine-tuning of the same three levels: one
     # uniformly random level per step, CE only, no ordering, no Stage 1, no KD.
     # (MatFormer nests only the FFN, which cannot reach a 0.19B level of Qwen3-0.6B.)

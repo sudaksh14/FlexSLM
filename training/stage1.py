@@ -117,6 +117,7 @@ class Stage1Context(FlexTrainingContext):
     dwa_temperature: float = 2.0
     anchor_levels: tuple = None
     continuum_lr: float = 1e-3
+    train_levels: tuple = None
 
     def __init__(self, train_tokens=S1_PILOT_TOKENS, data_dir=PMC_DATA_DIR, max_seq_length=1024,
                  global_batch_size=32, kd_lambda=0.5, kd_temperature=2.0, teacher_hf_model="Qwen/Qwen3-1.7B",
@@ -124,7 +125,7 @@ class Stage1Context(FlexTrainingContext):
                  warmup_ratio=0.01, activation_checkpointing=True, loss_chunk_size=1024,
                  micro_batch_size=4, level_weighting="none", level_weight_lr=1e-2, level_weight_ema=0.9,
                  level_weights_fixed=None, dwa_window=50, dwa_temperature=2.0,
-                 anchor_levels=None, continuum_lr=1e-3,
+                 anchor_levels=None, continuum_lr=1e-3, train_levels=None,
                  epochs=1, patience=1000, **kwargs):
         loader = functools.partial(load_pmc_memmap, data_dir=data_dir, max_seq_length=max_seq_length,
                                    global_batch_size=global_batch_size, train_tokens=train_tokens)
@@ -152,6 +153,10 @@ class Stage1Context(FlexTrainingContext):
         self.dwa_temperature = dwa_temperature
         self.anchor_levels = tuple(anchor_levels) if anchor_levels else None
         self.continuum_lr = continuum_lr
+        # Train (and validate) only these levels: the independent baselines (I1) are one
+        # level of the same nested model, i.e. the same importance-ordered prefix, trained
+        # alone; the other weights get no gradient and are never exported for evaluation.
+        self.train_levels = tuple(train_levels) if train_levels else None
 
     def make_optimizer(self, model):
         return adamw(model.parameters(), lr=self.lr, weight_decay=self.weight_decay,
@@ -171,6 +176,10 @@ class FlexLMStage1Trainer(MemOptFlexLMKDTrainer):
         optimizer = ctx.make_optimizer(self.submodel)
         scheduler = ctx.make_step_scheduler(optimizer, int(self.trainer.estimated_stepping_batches))
         return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "interval": "step"}}
+
+    def _select_levels(self, stage: str) -> list:
+        levels = getattr(self.training_context, "train_levels", None)
+        return list(levels) if levels else super()._select_levels(stage)
 
     def on_train_epoch_end(self):
         # The schedule is stepped per optimizer step in _step, never per epoch.
@@ -241,6 +250,10 @@ CORRECTED_TEACHER_1P7B = os.path.join("hf_export", utils.make_str_filename_safe(
                                       "level0")
 # Width-range ablation for the final experiments only (user, 2026-11-12): levels down to 0.25.
 FRACTIONS_025 = (0.25, 0.5, 0.75, 1.0)
+# The final Stage-1 recipe: overrides of make_stage1's defaults, filled in once the pilots are
+# analysed. Every final-budget run (full, no_order, w025, the independent baselines) uses it,
+# so they cannot drift apart.
+FINAL_S1 = dict()  # never put `ordering` here: that is importance_order.FINAL_ORDERING
 
 
 def make_stage1(train_tokens: int, wandb_project_name: str, ordering: str = "none",
@@ -276,11 +289,17 @@ def register_stage1_configs(configs: dict) -> None:
         S1_PILOT_TOKENS, "MedNest_s1_teacher_correction", preset="qwen3-1.7b-gqa", fractions=(1.0,),
         kd_lambda=0.0, lr=2e-5, gradient_clip_val=None)
     flex["s1.qwen3_0p6b.full.w025"] = make_stage1(S1_FULL_TOKENS, "MedNest_s1_full_w025",
-                                                  ordering=FINAL_ORDERING, fractions=FRACTIONS_025)
-    flex["s1.qwen3_0p6b.full"] = make_stage1(S1_FULL_TOKENS, "MedNest_s1_full", ordering=FINAL_ORDERING)
+                                                  ordering=FINAL_ORDERING, fractions=FRACTIONS_025, **FINAL_S1)
+    flex["s1.qwen3_0p6b.full"] = make_stage1(S1_FULL_TOKENS, "MedNest_s1_full", ordering=FINAL_ORDERING, **FINAL_S1)
+    # I1: independent baselines of the L0 (0.19B) and L1 (0.36B) shapes, the same ordered
+    # prefix as the nested level, trained alone with the same Stage-1 budget and recipe.
+    for lvl in (0, 1):
+        flex[f"s1.qwen3_0p6b.full.indep_l{lvl}"] = make_stage1(
+            S1_FULL_TOKENS, f"MedNest_s1_indep_l{lvl}", ordering=FINAL_ORDERING,
+            **dict(FINAL_S1, train_levels=(lvl,)))
     # A1: the final recipe without importance ordering (Stage 2: ...nested.no_order). Only
     # meaningful if the pilots choose an ordering; if FINAL_ORDERING stays "none", A1 is
     # reported from the order_* pilots instead and this config is not run.
     flex["s1.qwen3_0p6b.full.no_order"] = make_stage1(S1_FULL_TOKENS, "MedNest_s1_full_no_order",
-                                                      ordering="none")
+                                                      **dict(FINAL_S1, ordering="none"))
     flex["s1.dev.qwen3_0p6b_smoke"] = make_stage1(2_000_000, "MedNest_s1_dev")
