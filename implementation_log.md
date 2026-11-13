@@ -182,7 +182,7 @@ max_seq 3072):
   `gpu_tests.sbatch`, `train.sbatch <cfg>` (node205 2×A40; smoke with
   `--export=ALL,SMOKE_STEPS=20`), `export.sbatch <cfg>` (fatq node201),
   `evalgen.sbatch <model>` (eval GPUs, excludes node205).
-- Rules: sbatch only; GPU on defq 205–208 (training node205, and node206 1x A40 for Stage-1 pilots (user, 2026-11-10): `sbatch --nodelist=node206 --gres=gpu:1 --ntasks-per-node=1 scripts/das6/train.sbatch <cfg>`; eval 206–208), CPU on
+- Rules: sbatch only; GPU on defq 205–208 (training node205, and node206 1x A40 for Stage-1 pilots (user, 2026-11-10): `sbatch --nodelist=node206 --gres=gpu:1 --ntasks-per-node=1 --cpus-per-task=64 scripts/das6/train.sbatch <cfg>` (64 CPUs since 2026-11-13); eval 206–208), CPU on
   fatq 201–203; `--time` = 2× pessimistic estimate (max 150 h); never `--mem`;
   never wait > 10 min for a job (submit, record IDs, chain with `afterok`).
 
@@ -737,3 +737,12 @@ max_seq 3072):
 - Observation, not changed: `scripts/das6/train.sbatch` asks 2 tasks x 16 CPUs = 32 of node205's 64 CPUs; the DAS-6
   rule says to request all CPUs when holding all GPUs (dataloader throttling). Results are unaffected (throughput
   only); consider 32 per task for new submissions.
+- **DAS-6 CPU request fixed (user, 2026-11-13):** `scripts/das6/train.sbatch` now `--cpus-per-task=32` (2 tasks x 32 = all
+  64 CPUs of node205); 1-GPU runs on node206 pass `--cpus-per-task=64` (usage comment, `queue_2026-11-12.sh` and §5
+  updated). The old 16 never errored: Slurm only confines each task to the cores requested (task/affinity), so each rank
+  (main process + 4 dataloader workers + torch threads) shared 16 cores and 32 cores sat idle; partition defq is
+  OverSubscribe=EXCLUSIVE, so nobody else could use them. Effect: possible dataloader throttling, never different results.
+  **sbatch copies the script at submission, so jobs already submitted keep 16 CPUs/task**: the running 28154 (node205) and
+  28183 (node206) and the pending 28168, 28171, 28173, 28175, 28177, 28179, 28181, 28185, 28187, 28189. Not touched
+  (changing a running job's CPUs is not possible; cancelling the chain to resubmit is not worth it for a throughput-only
+  effect unless the user wants it).

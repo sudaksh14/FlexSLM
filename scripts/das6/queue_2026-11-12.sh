@@ -10,7 +10,7 @@ cd ~/FlexSLM
 sb() { sbatch --parsable "$@"; }
 log() { echo "$*" | tee -a jobs/queue_2026-11-12.ids; }
 P=s1.qwen3_0p6b.pilot
-N206=(--nodelist=node206 --gres=gpu:1 --ntasks-per-node=1)
+N206=(--nodelist=node206 --gres=gpu:1 --ntasks-per-node=1 --cpus-per-task=64)  # all 64 CPUs: DAS-6 rule
 
 # --- 1. No training: teacher / student PMC perplexity, continuum of existing pilots -------
 log "pmcppl Qwen3-1.7B $(sb scripts/das6/eval_continuum.sbatch --hf Qwen/Qwen3-1.7B)"
