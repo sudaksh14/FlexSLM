@@ -657,3 +657,37 @@ max_seq 3072):
   deadline).** Our fairshare priority is 5; 46 jobs pending on performance, 274 on capacity. => S1 training on hipster
   is not feasible before 2026-12-15 per the scheduler; needs a user decision (DAS-6 node205 with ZeRO-1 over 2 A40s
   is the fallback).
+- User (2026-11-13): keep hipster for the 1.7B experiments; small urgent checks on **capacity** (less busy), heavy jobs on
+  **performance**. Checks resubmitted on capacity (1 L4, 16 CPU): check 391242, II-Medical-8B PMC ppl 391243, evalgen
+  32 tok (batch 4, 8 h) 391244; the performance copies 391237-391239 stay queued (est. 11-15); cancel whichever pair is
+  still pending when the other has run.
+- S1 configs: `s1.qwen3_1p7b.full` (100M, FINAL_S1 + S1_1P7B: preset qwen3-1.7b-gqa, hidden 1024/1536/2048, heads
+  8/12/16, kv 4/6/8, FFN 3072/4608/6144, teacher II-Medical-8B, ZeRO-1, micro-batch 2; original weight order: make_stage1
+  now refuses a non-"none" ordering for presets without an ordered checkpoint), `s1.dev.qwen3_1p7b_smoke`,
+  `sft.paper.qwen3_1p7b_nested` (8 per GPU x 4 = 32, micro 2, ZeRO-1, KD from II-Medical-8B). `scripts/hipster/train.sbatch`
+  (performance, 4 GPUs, 32 CPU/GPU). **4-GPU memory smoke 391246** (20 steps) queued on performance.
+- **Continuum results (methods 1 and 4, existing pilots; PMC val ppl; params total)** -- eval anchors reproduce the
+  pilots' val ppl within ~1% (base 17.19/11.22/7.49 vs 17.4/11.3/7.54 logged during training):
+
+  | width | params | base (3 trained) | levels5 (5 trained) | grid9_sw3 (9 trained, 3/step) | untrained init |
+  |---|---|---|---|---|---|
+  | 0.4375 | 157M | 29.7 | 31.1 | 28.6 | 7,724 |
+  | **0.5** | 188M | **17.2** | **17.2** | **17.1** | 4,996 |
+  | 0.5625 | 221M | 19.3 | 18.1 | **16.8** | 5,466 |
+  | 0.625 | 269M | 18.6 | **13.5** | **15.4** | 1,921 |
+  | 0.6875 | 323M | 14.6 | 13.2 | **13.7** | 495 |
+  | **0.75** | 364M | **11.2** | **11.1** | **12.5** | 279 |
+  | 0.8125 | 408M | 11.7 | 11.0 | **11.5** | 158 |
+  | 0.875 | 473M | 11.3 | **9.2** | **10.1** | 57 |
+  | 0.9375 | 543M | 9.2 | 8.7 | **8.6** | 16 |
+  | **1.0** | 596M | **7.5** | **7.6** | **7.5** | 10.1 |
+  (bold = trained width of that run; below 0.4375 everything is in the hundreds/thousands, as expected.)
+  Findings: (1) **zero-shot interpolation is not monotone**: just above a trained width the model gets WORSE with more
+  parameters (base: 0.5625 19.3 > 0.5 17.2; 0.8125 11.7 > 0.75 11.2), recovering only near the next anchor; most method-1
+  points are dominated by the anchor below. (2) More trained widths fix it: levels5's untrained widths are monotone
+  except right above 0.5 (18.1); grid9_sw3 is smooth everywhere but its 0.75 anchor is 12% worse (12.5 vs 11.2).
+  (3) Mix'n'Match (method 4) on base: residual width of the upper anchor with the LAST k layers' MLP/heads shrunk is
+  the best placement (0.5-0.75: 344M 13.7-13.9, 323M 16.1; 0.75-1.0: 569M 9.0, 541M 10.1, 513M 11.0); configurations at
+  the lower anchor's residual width are all dominated by that anchor. Taylor ordering lowers everything (base -> taylor
+  e.g. 344M 13.7 -> 12.0, 569M 9.0 -> 8.0). => methods 2 and 3 (running) are needed for a usable continuum; Pareto plot:
+  anchors = dots, untrained = stars, dominated points visible.
