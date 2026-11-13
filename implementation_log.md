@@ -621,3 +621,7 @@ max_seq 3072):
   unexpectedly rebooted" (2026-11-12 18:20-18:26), node204 down since April. Slurm does not return nodes in that state by
   itself; an admin must resume them. All 41 jobs (28150-28190) still PENDING (ReqNodeNotAvail / Dependency); they start
   automatically once the nodes are resumed, nothing to resubmit.
+- 12:57: nodes resumed, jobs started. B1 28150 and pilot noclip 28155 resumed from last.ckpt (saved 16:24 / 16:29 on
+  11-12). **PMC val ppl (Stage-1 val windows, 640 x 1,024): Qwen3-0.6B 10.11, Qwen3-1.7B (Stage-1 teacher) 7.92.**
+  After 20M tokens the base pilot's full width is at 7.54, i.e. **better than its teacher on PMC**: the teacher-correction
+  hypothesis holds (pure KD toward a worse teacher pulled L2 to 9.76 in kd1). Corrected teacher: 28168 -> 28170.
