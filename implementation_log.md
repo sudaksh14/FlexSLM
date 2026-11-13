@@ -615,3 +615,9 @@ max_seq 3072):
   node205; grid9_anchors_plus1 28183 (28184), level_norms 28185 (28186), mod_scale 28187 (28188), mod_scale_shift 28189
   (28190) on node206. The outage interrupted B1 28150 (step 323/1044) and pilot noclip 28155; Slurm requeued both
   (resume from last.ckpt); 28151-28154 still queued behind them.
+
+### 2026-11-13
+- No results: nothing ran since the outage. sinfo (12:49): node201-203 and node205-208 all `down`, reason "Node
+  unexpectedly rebooted" (2026-11-12 18:20-18:26), node204 down since April. Slurm does not return nodes in that state by
+  itself; an admin must resume them. All 41 jobs (28150-28190) still PENDING (ReqNodeNotAvail / Dependency); they start
+  automatically once the nodes are resumed, nothing to resubmit.
