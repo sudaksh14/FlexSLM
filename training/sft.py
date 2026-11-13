@@ -152,6 +152,11 @@ SFT_RUNS = [
         train_levels=[0], wandb_project_name="MedNest_i1_indep_l0")),
     ("sft.paper.qwen3_0p6b_indep_l1", "s1.qwen3_0p6b.full.indep_l1", dict(_S2,
         train_levels=[1], wandb_project_name="MedNest_i1_indep_l1")),
+    # S1 Stage 2 (hipster, 4 GPUs): nested SFT of Qwen3-1.7B from s1.qwen3_1p7b.full, KD from II-Medical-8B,
+    # the paper schedule (effective batch 32 = 8 per GPU x 4), ZeRO-1, smaller micro-batches for the 8B teacher.
+    ("sft.paper.qwen3_1p7b_nested", "s1.qwen3_1p7b.full", dict(_S2,
+        teacher_hf_model="Intelligent-Internet/II-Medical-8B", tokenizer_name="Qwen/Qwen3-1.7B",
+        batch_size=8, micro_batch_size=2, zero_optimizer=True, wandb_project_name="MedNest_s1_1p7b_s2")),
     # Baseline B2: MatFormer-style nested fine-tuning of the same three levels: one
     # uniformly random level per step, CE only, no ordering, no Stage 1, no KD.
     # (MatFormer nests only the FFN, which cannot reach a 0.19B level of Qwen3-0.6B.)

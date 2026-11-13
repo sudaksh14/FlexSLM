@@ -256,6 +256,12 @@ FRACTIONS_025 = (0.25, 0.5, 0.75, 1.0)
 # analysed. Every final-budget run (full, no_order, w025, the independent baselines) uses it,
 # so they cannot drift apart.
 FINAL_S1 = dict()  # never put `ordering` here: that is importance_order.FINAL_ORDERING
+# S1 (scaling): Qwen3-1.7B backbone, levels 0.5 / 0.75 / 1.0 (hidden 1024 / 1536 / 2048), on hipster
+# (performance partition, 4 x RTX 6000 Ada 48 GB). The KD teacher must be larger than 1.7B: the existing
+# medical fine-tune II-Medical-8B (Qwen3-8B, same tokenizer; user decision 2026-11-13). The 8B bf16
+# teacher (16.4 GB) next to the student's fp32 weights + grads (13.8 GB) needs ZeRO-1 for the Adam state.
+II_MEDICAL_8B = "Intelligent-Internet/II-Medical-8B"
+S1_1P7B = dict(preset="qwen3-1.7b-gqa", teacher_hf_model=II_MEDICAL_8B, zero_optimizer=True, micro_batch_size=2)
 
 
 def make_stage1(train_tokens: int, wandb_project_name: str, ordering: str = "none",
@@ -268,6 +274,9 @@ def make_stage1(train_tokens: int, wandb_project_name: str, ordering: str = "non
     from config.experiments import make_flexllama_warmstart_kd
     from training.importance_order import start_weights
     model_config = make_flexllama_warmstart_kd(preset, fractions=tuple(fractions)).model_config
+    if preset != "qwen3-0.6b" and ordering != "none":
+        raise NotImplementedError(f"ordering {ordering!r} for {preset}: build its ordered checkpoint first "
+                                  "(training/importance_order.py --model ...) and add it to ORDERED_CHECKPOINTS")
     hf_start = start_weights(ordering) if preset == "qwen3-0.6b" else model_config.pretrained_hf_model
     model_config = dataclasses.replace(model_config, pretrained_hf_model=hf_start,
                                        level_norms=level_norms, modulation=modulation)
@@ -305,3 +314,7 @@ def register_stage1_configs(configs: dict) -> None:
     flex["s1.qwen3_0p6b.full.no_order"] = make_stage1(S1_FULL_TOKENS, "MedNest_s1_full_no_order",
                                                       **dict(FINAL_S1, ordering="none"))
     flex["s1.dev.qwen3_0p6b_smoke"] = make_stage1(2_000_000, "MedNest_s1_dev")
+    # S1 on Qwen3-1.7B: original weight order until a 1.7B ordered checkpoint exists (make_stage1 refuses
+    # anything else); the 0.6B recipe (FINAL_S1) otherwise.
+    flex["s1.qwen3_1p7b.full"] = make_stage1(S1_FULL_TOKENS, "MedNest_s1_1p7b_full", **dict(FINAL_S1, **S1_1P7B))
+    flex["s1.dev.qwen3_1p7b_smoke"] = make_stage1(2_000_000, "MedNest_s1_1p7b_dev", **S1_1P7B)
