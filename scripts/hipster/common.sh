@@ -6,7 +6,10 @@
 #    cluster, so never --exclusive, request exactly the GPUs/CPUs needed;
 #  - CUDA module cuda/12.9.1; conda env my_env (torch 2.8.0, transformers 4.57.6, lightning
 #    2.5.2, python 3.9), used read-only, nothing is installed into it;
-#  - /home is small (200 GB, shared with other projects): heavy files on /scratch/$USER/flexslm.
+#  - storage (global rules: ~/.claude/CLAUDE.md): /scratch is wiped every few weeks, so it holds ONLY
+#    checkpoints and reproducible items (store/, hf_export/, jobs/); repo root, data, results and
+#    caches live in /home (200 GB, shared by all projects). Until scripts/hipster/migrate_to_home.sbatch
+#    has run, data/results/HF cache are still in /scratch/$USER/flexslm (symlinked into the repo).
 # The code lives in ~/FlexSLM-medbench (the older ~/FlexSLM clone on hipster is left alone).
 # Usage at the top of a job script:  source scripts/hipster/common.sh gpu|cpu
 set -eo pipefail
@@ -14,7 +17,12 @@ set -eo pipefail
 KIND=${1:-gpu}
 export FLEXSLM_SCRATCH=/scratch/$USER/flexslm
 export FLEXSLM_STORE=${FLEXSLM_STORE:-$FLEXSLM_SCRATCH/store}
-export HF_HOME=$FLEXSLM_SCRATCH/hf_cache
+# Hugging Face cache: the home copy once it exists (after the migration), else the scratch one.
+if [[ -d /home/$USER/flexslm_saves/cache/huggingface ]]; then
+  export HF_HOME=/home/$USER/flexslm_saves/cache/huggingface
+else
+  export HF_HOME=$FLEXSLM_SCRATCH/hf_cache
+fi
 export HF_TOKEN=$(cat "$HOME/.hf_token" 2>/dev/null || true)
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1

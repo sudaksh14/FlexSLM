@@ -691,3 +691,27 @@ max_seq 3072):
   the lower anchor's residual width are all dominated by that anchor. Taylor ordering lowers everything (base -> taylor
   e.g. 344M 13.7 -> 12.0, 569M 9.0 -> 8.0). => methods 2 and 3 (running) are needed for a usable continuum; Pareto plot:
   anchors = dots, untrained = stars, dominated points visible.
+- **Hipster storage rules (user, 2026-11-13):** `/scratch` is wiped every few weeks -> only checkpoints and reproducible
+  items there; repo root, data, results and caches in `/home/skalra`; nothing irreplaceable stays in scratch (finals
+  are copied off: home if small, SURFdrive if large). The user's existing FlexLLaVA convention is the same (checkpoints
+  in `/scratch/skalra/flexllava_saves/checkpoints`, HF cache and wandb in `/home/skalra/flexllava_saves`). Written as a
+  **global, all-project note** in `~/.claude/CLAUDE.md` on the local machine AND on hipster (identical, md5 checked;
+  there was none before): fair-use rules (sbatch only, no login-node work, never --exclusive/--mem, exact resources and
+  ~2x time, performance vs capacity guidance, per-user QoS cap 256 CPUs per partition, no duplicate/speculative jobs,
+  smoke tests, <=8-9 parallel ssh to DAS-6), storage rules, and bookkeeping. The cluster policy page itself is behind a
+  university login (not readable by Claude).
+- **Current (temporary) violation, to be fixed after the queued jobs finish:** our data (4.0 GB pmc_qwen3 + 34 MB
+  medmix_sft), results/ and the HF cache (21 GB: Qwen3-0.6B/1.7B + II-Medical-8B 16 GB) are in
+  `/scratch/skalra/flexslm`, symlinked into `~/FlexSLM-medbench`. Fix prepared: **`scripts/hipster/migrate_to_home.sbatch`**
+  (capacity, 4 CPUs, 6 h; refuses with exit 3 while any `flexslm_*` job of ours is queued/running; copy -> `diff -rq`
+  -> swap symlink for a real directory -> delete the scratch copy). Targets: `~/FlexSLM-medbench/data/{pmc_qwen3,
+  medmix_sft}`, `~/FlexSLM-medbench/results`, HF cache `~/flexslm_saves/cache/huggingface` (`common.sh` switches
+  HF_HOME to it automatically once that directory exists). Stays in scratch: `store/` (checkpoints, wandb),
+  `hf_export/`, `jobs/` (Slurm logs; numbers are recorded here). Tested on dummy directories on hipster (symlink
+  swap, verification, guard). Home after the move: ~131 GB of 200 GB (now 106 GB). **Do: after the hipster jobs 391237-391246
+  (and anything queued later) finish, `sbatch scripts/hipster/migrate_to_home.sbatch` from ~/FlexSLM-medbench, then
+  re-check that no flexslm path under /scratch is still needed. Do not re-run setup.sh afterwards as is.**
+  Open question to the user: the destination was written as `home/skalra/FlexSLM`; the code (and so data/) lives in
+  `~/FlexSLM-medbench` because `~/FlexSLM` is an old clone (commit b39fbcc) with its own wandb/jobs.
+- Final checkpoints of the 1.7B runs (S1) must not stay in scratch: export, copy the export to home or SURFdrive, delete
+  the Lightning checkpoints (7 GB+ each with optimizer state).

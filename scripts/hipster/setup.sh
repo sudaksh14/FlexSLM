@@ -4,6 +4,9 @@
 #  2. data streamed from DAS-6 (hipster reaches it over ssh): PMC tokens and the medmix SFT set;
 #  3. the Qwen3 HF cache copied from DAS-6, and Intelligent-Internet/II-Medical-8B downloaded
 #     (the candidate teacher for the 1.7B backbone, user decision 2026-11-13).
+# NOTE (2026-11-13): this puts data and the HF cache in /scratch, which is wiped every few weeks. Run
+# scripts/hipster/migrate_to_home.sbatch (capacity job) once no flexslm job is queued or running; if it
+# has already run (~/flexslm_saves/cache/huggingface exists), do NOT re-run this script as is.
 #   bash scripts/hipster/setup.sh
 set -eo pipefail
 S=/scratch/$USER/flexslm
