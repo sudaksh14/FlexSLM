@@ -7,9 +7,10 @@
 #  - CUDA module cuda/12.9.1; conda env my_env (torch 2.8.0, transformers 4.57.6, lightning
 #    2.5.2, python 3.9), used read-only, nothing is installed into it;
 #  - storage (global rules: ~/.claude/CLAUDE.md): /scratch is wiped every few weeks, so it holds ONLY
-#    checkpoints and reproducible items (store/, hf_export/, jobs/); repo root, data, results and
-#    caches live in /home (200 GB, shared by all projects). Until scripts/hipster/migrate_to_home.sbatch
-#    has run, data/results/HF cache are still in /scratch/$USER/flexslm (symlinked into the repo).
+#    checkpoints and reproducible items (store/, hf_export/); repo root, data, results, Slurm logs
+#    (jobs/) and caches live in /home (200 GB, shared by all projects). Until
+#    scripts/hipster/migrate_to_home.sbatch has run, data/results/jobs/HF cache are still in
+#    /scratch/$USER/flexslm (symlinked into the repo). Nothing goes to SURFdrive unless the user asks.
 # The code lives in ~/FlexSLM-medbench (the older ~/FlexSLM clone on hipster is left alone).
 # Usage at the top of a job script:  source scripts/hipster/common.sh gpu|cpu
 set -eo pipefail

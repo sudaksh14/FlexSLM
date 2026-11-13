@@ -4,14 +4,15 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=06:00:00
-#SBATCH --output=/scratch/skalra/flexslm_migrate-%j.out
+#SBATCH --output=/home/skalra/FlexSLM-medbench/flexslm_migrate-%j.out
 # Moves everything that must survive the periodic /scratch cleanup out of /scratch (user, 2026-11-13):
 #   data/pmc_qwen3, data/medmix_sft  -> ~/FlexSLM-medbench/data/   (real directory instead of a symlink)
 #   results/                         -> ~/FlexSLM-medbench/results/
+#   jobs/ (all Slurm output logs)    -> ~/FlexSLM-medbench/jobs/      (user, 2026-11-13: logs live in the repo root)
 #   hf_cache/ (Hugging Face cache)   -> ~/flexslm_saves/cache/huggingface/   (scripts/hipster/common.sh
 #                                       switches HF_HOME to it as soon as that directory exists)
 # Stays in /scratch (checkpoints and reproducible items only): store/ (checkpoints, wandb), hf_export/,
-# jobs/ (Slurm logs; their numbers are recorded in implementation_log.md), smoke_store/.
+# smoke_store/. Nothing goes to SURFdrive (only on the user's explicit request, final checkpoints only).
 # Each piece is copied, compared byte for byte (diff -rq), swapped in, and only then deleted from
 # /scratch. Run it ONLY when none of our jobs are queued or running (checked below): it replaces the
 # data/ and results/ symlinks that running jobs read.
@@ -54,6 +55,7 @@ for d in pmc_qwen3 medmix_sft; do
 done
 rmdir "$S/data" 2>/dev/null || true
 move_dir "$S/results" "$R/results"
+move_dir "$S/jobs" "$R/jobs"
 move_dir "$S/hf_cache" "$HS/cache/huggingface"
 df -h "$HOME" | tail -1
-echo "[migrate] finished; repo data/ and results/ are real directories in $R, HF cache in $HS/cache/huggingface"
+echo "[migrate] finished; repo data/, results/ and jobs/ are real directories in $R, HF cache in $HS/cache/huggingface"

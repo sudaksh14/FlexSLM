@@ -715,3 +715,25 @@ max_seq 3072):
   `~/FlexSLM-medbench` because `~/FlexSLM` is an old clone (commit b39fbcc) with its own wandb/jobs.
 - Final checkpoints of the 1.7B runs (S1) must not stay in scratch: export, copy the export to home or SURFdrive, delete
   the Lightning checkpoints (7 GB+ each with optimizer state).
+- **User decisions (2026-11-13, later):** (a) move the data into `~/FlexSLM-medbench` (confirmed; the old `~/FlexSLM`
+  clone stays untouched); (b) **all Slurm output logs go into the repo root** (`~/FlexSLM-medbench/jobs/`, real
+  directory in /home); (c) **no checkpoints (or anything) to SURFdrive unless the user explicitly asks**, final
+  checkpoints only; (d) a DAS-6 rules note, with the module/conda lines every GPU batch script must contain.
+- **Global notes restructured** into user-level rules files (auto-loaded in every project; verified in the Claude Code
+  docs that `~/.claude/rules/*.md` apply machine-wide): `~/.claude/rules/hipster-cluster.md` and
+  `~/.claude/rules/das6-cluster.md`, installed identically on the local machine, on hipster and on DAS-6 (md5 checked);
+  the single `~/.claude/CLAUDE.md` created earlier today was removed everywhere (verified unmodified first).
+  hipster-cluster.md now: logs in repo-root jobs/, SURFdrive only on request, GPU scripts load `cuda/12.9.1` + conda env
+  and fail fast if torch sees no GPU. das6-cluster.md: node table (defq node205 2xA40, node206 1xA40, node207 1xA10,
+  node208 2xA10, 64 CPUs each, partition OverSubscribe=EXCLUSIVE; fatq node201-203 CPU only, node204 down), 1- vs 2-GPU
+  distribution, all CPUs when all GPUs of a node are held, no --mem, --time 2x, no waiting >10 min, the required
+  script header (`module load cuda12.6/toolkit/12.6` etc.; versions available 11.7/12.1/12.3/12.6/13.0; **there is no
+  conda module on DAS-6**, so `eval "$(conda shell.bash hook)"` / `source .../minimonda3/etc/profile.d/conda.sh` +
+  `conda activate`), storage (/home 5 TB for repo roots; /var/scratch/skalra 198 TB for big files; not cleaned; nothing
+  leaves DAS-6 unless asked).
+- `scripts/hipster/migrate_to_home.sbatch` now also moves `jobs/` (Slurm logs) into the repo root and writes its own log
+  to the repo root; retested on dummy dirs on hipster (data, results, jobs, HF cache; store/ and hf_export/ stay in
+  scratch). **Still to run once jobs 391237-391246 and anything queued after them have finished.**
+- Observation, not changed: `scripts/das6/train.sbatch` asks 2 tasks x 16 CPUs = 32 of node205's 64 CPUs; the DAS-6
+  rule says to request all CPUs when holding all GPUs (dataloader throttling). Results are unaffected (throughput
+  only); consider 32 per task for new submissions.
