@@ -2,7 +2,8 @@
 #SBATCH --job-name=flexslm_evalgen
 #SBATCH --partition=defq
 #SBATCH --gres=gpu:1
-#SBATCH --exclude=node205
+#SBATCH --exclude=node205,node208
+# node208 stays free for another user (user, 2026-11-17); use it only when the user says so.
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
 # Expected (pessimistic) 45 min: 12,797 test prompts, 32 new tokens, <=1.7B model.
@@ -16,6 +17,8 @@ MODEL=${1:?"usage: sbatch scripts/das6/evalgen.sbatch <hf_model> [max_new_tokens
 MAX_NEW=${2:-32}
 BS=${3:-32}
 SRC=${4:-}
+PF=${PROMPT_FORMAT:-as_is}
 source scripts/das6/common.sh gpu
-OUT="results/gen.$(echo "$MODEL" | tr '/' '-').t$MAX_NEW${SRC:+.$(echo "$SRC" | tr '/,' '-+')}.json"
-python -m eval.eval_gen "$MODEL" --out "$OUT" --max_new_tokens "$MAX_NEW" --batch_size "$BS" ${SRC:+--sources "$SRC"}
+PFTAG=""; [[ "$PF" != as_is ]] && PFTAG=".p$PF"
+OUT="results/gen.$(echo "$MODEL" | tr '/' '-').t$MAX_NEW$PFTAG${SRC:+.$(echo "$SRC" | tr '/,' '-+')}.json"
+python -m eval.eval_gen "$MODEL" --out "$OUT" --max_new_tokens "$MAX_NEW" --batch_size "$BS"   --prompt_format "$PF" ${SRC:+--sources "$SRC"} ${REVISION:+--revision "$REVISION"}   ${TRUST_REMOTE_CODE:+--trust_remote_code}

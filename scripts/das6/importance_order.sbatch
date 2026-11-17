@@ -2,7 +2,8 @@
 #SBATCH --job-name=flexslm_order
 #SBATCH --partition=defq
 #SBATCH --gres=gpu:1
-#SBATCH --exclude=node205
+#SBATCH --exclude=node205,node208
+# node208 stays free for another user (user, 2026-11-17); use it only when the user says so.
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
 # Expected (pessimistic) 30 min: 512 x 512 calibration tokens (jobs 28091/28094 ran out of

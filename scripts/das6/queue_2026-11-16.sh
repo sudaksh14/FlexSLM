@@ -11,13 +11,13 @@
 #   final recipe at 20M (gate of the 100M run) -> independent L0 -> independent L1 -> no ordering
 # node207: untrained Qwen3-0.6B with 1,024 new tokens (B0), Minitron ordering of Qwen3-1.7B
 # Exports: fatq is fully occupied (another user's 15-day jobs on node201-203), so the CPU export
-# jobs run on node208 (defq, no GPU requested), a few minutes each.
+# jobs run on node207 (defq, no GPU requested), a few minutes each. node208 is NOT used (user, 2026-11-17).
 set -eo pipefail
 cd ~/FlexSLM
 IDS=jobs/queue_2026-11-16.ids
 N205="--nodelist=node205"
 N206="--nodelist=node206 --gres=gpu:1 --ntasks-per-node=1 --cpus-per-task=64"
-EVALNODES="--exclude=node205,node206"
+EVALNODES="--exclude=node205,node206,node208"  # node208: kept free for another user (2026-11-17)
 
 sub() { sbatch --parsable "$@"; }
 note() { echo "$*" | tee -a "$IDS"; }
@@ -26,7 +26,7 @@ note() { echo "$*" | tee -a "$IDS"; }
 export_eval() {  # <train job id> <config> <levels...>
   local dep=$1 cfg=$2; shift 2
   local dir="hf_export/flexllama__$cfg"
-  local e; e=$(sub --partition=defq --nodelist=node208 --dependency=afterok:$dep scripts/das6/export.sbatch "$cfg")
+  local e; e=$(sub --partition=defq --nodelist=node207 --dependency=afterok:$dep scripts/das6/export.sbatch "$cfg")
   local evs=""
   for l in "$@"; do
     evs="$evs $(sub $EVALNODES --dependency=afterok:$e scripts/das6/evalgen.sbatch "$dir/level$l")"
@@ -37,7 +37,7 @@ export_eval() {  # <train job id> <config> <levels...>
 # ---- node207: B0 and the 1.7B ordering
 B0=$(sub --nodelist=node207 --time=16:00:00 scripts/das6/evalgen.sbatch Qwen/Qwen3-0.6B 1024 32)
 note "B0 untrained Qwen3-0.6B, 1,024 new tokens: $B0"
-ORD17=$(sub --nodelist=node208 scripts/das6/importance_order.sbatch --model Qwen/Qwen3-1.7B --scheme minitron \
+ORD17=$(sub --nodelist=node207 scripts/das6/importance_order.sbatch --model Qwen/Qwen3-1.7B --scheme minitron \
         --out hf_export/qwen3-1.7b.minitron --eval-seqs 0)
 note "Minitron ordering of Qwen3-1.7B: $ORD17"
 

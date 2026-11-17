@@ -2,7 +2,8 @@
 #SBATCH --job-name=flexslm_gpu_tests
 #SBATCH --partition=defq
 #SBATCH --gres=gpu:1
-#SBATCH --exclude=node205
+#SBATCH --exclude=node205,node208
+# node208 stays free for another user (user, 2026-11-17); use it only when the user says so.
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
 # Expected (pessimistic) 20 min: unit tests + two real-checkpoint warm-start checks.

@@ -943,3 +943,26 @@ max_seq 3072):
   the API (config + full history at the same steps + summary, same id/name, group/tag = old project,
   `copied_from(_created_at)` in config; old projects untouched). Test 28307 (1 run), full copy **28308** (node208).
   Old per-config projects can be deleted in the W&B UI after checking (not done; ask).
+- **node208 is off limits (user, 2026-11-17): keep it free for another user unless the user says otherwise.**
+  Pending jobs updated with scontrol: 7 exports (28231, 28242, 28253, 28256, 28259, 28270, 28275) ReqNodeList node208 ->
+  node207; 29 evals ExcNodeList node205,node206 -> +node208 (all evals now run on node207 only). Scripts: every
+  `#SBATCH --exclude=node205` -> `node205,node208`; queue_2026-11-16.sh exports/ordering on node207; memory note.
+- **28263 (1.7B Stage 1, ~33-40 h) re-chained** to afterany 28241, 28255, 28258, 28274 (it only waited for 28241 and
+  would have taken node205 before A1 / indep 0.75 / A2). node205 order now: 28230 -> {28269, 28241} -> 28274 ->
+  28252 -> 28255 -> 28258 (after 28206) -> 28263 (Slurm picks among eligible jobs by priority).
+- Apollo evals in our pipeline (`--prompt_format apollo_answer`: Apollo's "User:..\nAssistant:" with the assistant
+  turn pre-filled "The correct answer is", first option letter / value; 16 tokens; 0-shot): 28311 Apollo-0.5B,
+  28312 Apollo2-0.5B, 28314 Apollo-2B, 28315 Apollo2-2B; Apollo-1.8B needs the Qwen-1 custom code (reviewed: identical
+  to Qwen/Qwen-1_8B's except a gradient-checkpointing method; pinned commit 73072ac), loaded from a dot-free local
+  snapshot `hf_export/apollo_1p8b` (`scripts/das6/apollo18_eval.sbatch`): 28313 failed (dot in repo name), 28321 OOM at
+  batch 32 on an A10, **28325** batch 8. With our boxed protocol and 1,024 tokens Apollo scores 0% (never boxes; 28309/28310).
+- **Apollo in our pipeline (apollo_answer, 0-shot), MedQA/MCQA/HeadQA/Calc/Bullets/Pro-H/Xpert = avg (avg w/o MedCalc):**
+  Apollo-0.5B 30.2/33.2/31.9/2.0/22.8/15.9/10.2 = **20.9** (24.0); Apollo2-0.5B 30.6/31.5/32.4/1.5/30.9/13.8/10.9 = **21.7**
+  (25.0); Apollo-1.8B 37.5/39.0/43.6/2.6/31.2/15.8/10.2 = **25.7** (29.6); Apollo-2B 34.1/36.4/38.2/2.5/20.8/16.3/10.9 =
+  **22.7** (26.1); Apollo2-2B 49.1/43.5/43.3/1.0/35.2/22.5/11.2 = **29.4** (34.1). (Reported 3-shot: 0.5B MedQA 33.0, 2B 38.3:
+  our 0-shot numbers are close, so the protocol is not unfair to them.) MedNest pilot 596M 29.8 (30.1 w/o Calc), 364M 24.4
+  (24.3), 188M 20.9 (20.8). McNemar (pooled, same questions) 596M vs: Apollo-0.5B/Apollo2-0.5B/Apollo-2B p<1e-11 (also w/o
+  Calc); Apollo-1.8B all p=8e-10, w/o Calc 32.9 vs 32.1 p=0.08; Apollo2-2B all p=0.74, w/o Calc 32.9 vs 35.6 p=3e-7 (Apollo
+  better). 364M vs 0.5B Apollos w/o Calc: level (p 0.65-0.97). Our MedCalc advantage is in-distribution (its train split is
+  in medmix). Paper: "Comparison with Apollo" paragraph now uses these numbers (14 pages; length left to the user).
+  Untrained Qwen3-0.6B (1,024 tokens, reasoning) w/o Calc = 26.8: above our 364M width (but ~30x the generated tokens).

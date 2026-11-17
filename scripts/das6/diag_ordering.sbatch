@@ -2,7 +2,8 @@
 #SBATCH --job-name=flexslm_diag_order
 #SBATCH --partition=defq
 #SBATCH --gres=gpu:1
-#SBATCH --exclude=node205
+#SBATCH --exclude=node205,node208
+# node208 stays free for another user (user, 2026-11-17); use it only when the user says so.
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
 # Expected (pessimistic) 20 min: 8 variants x (save 2.4 GB + 3 level ppl passes on 16k tokens).
