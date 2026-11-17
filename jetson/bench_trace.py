@@ -123,6 +123,10 @@ def main():
     e = el.ElasticModel.load(dirs[max(dirs)], [dirs[l] for l in sorted(dirs)], device=args.device, dtype=dtype)
     tok = AutoTokenizer.from_pretrained(dirs[max(dirs)])
     decs = ElasticDecoders(e, trace_len) if args.decode == "graph" else None
+    needs = [wl.encode(tok, wl.prompt_for(r, "as_is"), "as_is", "cpu").shape[1] + 32 for r, _ in stream]
+    e.build_all()                                # views of every width: built once, before any request
+    warm_ms = decs.prepare_all(needs, levels) if decs is not None else 0.0   # + caches and CUDA graphs
+    w.write({"kind": "warmup", "ms": warm_ms, "cache_lengths": sorted({int(n) for n in needs})})
 
     def choose(policy, mode, prompt_tokens, deadline):
         if policy.startswith("fixed:"):
@@ -163,11 +167,16 @@ def main():
                         switch_ms = e.switch(level)["switch_ms"]
                         model, dec = e.width(level), (decs.get(level) if decs is not None else None)
                     eos = wl.eos_ids(model, tok)
+                    # Graph capture of a model that was just loaded is part of the cost of reloading it
+                    # (a new weight tensor needs a new graph); it is measured here, outside the request
+                    # itself, and reported as capture_ms. Elastic widths were warmed above: 0.
+                    capture_ms = dec.prepare(ids.shape[1] + 32) if dec is not None else 0.0
                     r = dec.generate(ids, 32, eos) if dec is not None else wl.timed_greedy(model, ids, 32, eos)
                     gen = tok.decode(r.pop("new_ids"), skip_special_tokens=True)
-                    latency = r["total_ms"] + switch_ms
+                    latency = r["total_ms"] + switch_ms + capture_ms
                     rec = {"kind": "request", "policy": policy, "i": i, "power_mode": mode, "urgent": urgent,
-                           "deadline_ms": deadline, "level": level, "switch_ms": switch_ms, "latency_ms": latency,
+                           "deadline_ms": deadline, "level": level, "switch_ms": switch_ms, "capture_ms": capture_ms,
+                           "latency_ms": latency,
                            "predicted_ms": predict(profiles[mode], level, ids.shape[1]),
                            "met": latency <= deadline, "test_index": row.get("test_index"), "source": row["source"],
                            **wl.score(row, gen, "as_is"), **r}
@@ -183,6 +192,7 @@ def main():
                 "latency_ms": stat_block([r["latency_ms"] for r in recs]),
                 "switches": sum(1 for a, b in zip(recs, recs[1:]) if a["level"] != b["level"]),
                 "switch_ms_total": sum(r["switch_ms"] for r in recs),
+                "capture_ms_total": sum(r["capture_ms"] for r in recs),
                 "levels_used": {l: sum(r["level"] == l for r in recs) for l in levels},
                 "energy_j_per_answer": (pw["energy_j"] / len(recs)) if pw.get("energy_j") is not None else None,
                 "power": pw}

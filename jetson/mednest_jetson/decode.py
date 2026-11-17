@@ -53,10 +53,28 @@ class GraphDecoder:
         self.pos = torch.zeros(1, dtype=torch.long, device=self.device)
         self.graph = None
         self.out = None
+        self.warm = False
 
     def kv_bytes(self) -> int:
         return sum(t.untyped_storage().nbytes() for t in {id(t.untyped_storage()): t
                    for t in self.cache.key_cache + self.cache.value_cache}.values())
+
+    @torch.no_grad()
+    def warmup(self) -> float:
+        """Capture the CUDA graph (and warm the kernels) now, so no measured request pays for it.
+        Runs one decode step at position 0: the next request's prefill overwrites that cache slot,
+        and positions beyond the current one are masked, so no later output depends on it.
+        Returns the time it took (ms); 0 if already warm."""
+        if self.warm:
+            return 0.0
+        _sync()
+        t0 = time.perf_counter()
+        self.tok.zero_()
+        self.pos.zero_()
+        self._step()
+        _sync()
+        self.warm = True
+        return (time.perf_counter() - t0) * 1000.0
 
     def _forward_step(self):
         return self.model(input_ids=self.tok, past_key_values=self.cache, cache_position=self.pos,
@@ -137,6 +155,10 @@ class _Proxy:
         need = int(input_ids.shape[1]) + max_new_tokens
         return self.parent.decoder(self.level, _bucket(need, self.parent.max_len)).generate(input_ids, max_new_tokens, eos)
 
+    def prepare(self, need: int) -> float:
+        """Build + capture what a request of `need` cache positions will use; returns ms spent."""
+        return self.parent.decoder(self.level, _bucket(int(need), self.parent.max_len)).warmup()
+
     def kv_bytes(self) -> int:
         return self.parent.kv_bytes()
 
@@ -162,6 +184,14 @@ class ElasticDecoders:
     def get(self, level: int) -> _Proxy:
         return _Proxy(self, level)
 
+    def prepare_all(self, needs, levels=None) -> float:
+        """Warm every (width, cache length) the given requests can use (views, caches, graphs)."""
+        ms = 0.0
+        for need in sorted({_bucket(int(n), self.max_len) for n in needs}):
+            for level in (levels if levels is not None else self.elastic.levels):
+                ms += self.decoder(level, need).warmup()
+        return ms
+
     def kv_bytes(self) -> int:
         top = max(self.elastic.levels)
         return sum(d.kv_bytes() for (l, _), d in self._dec.items() if l == top)
@@ -184,6 +214,9 @@ class DenseDecoders:
 
     def generate(self, input_ids, max_new_tokens, eos):
         return self.get().generate(input_ids, max_new_tokens, eos)
+
+    def prepare(self, need: int) -> float:
+        return self.get().prepare(need)
 
     def kv_bytes(self) -> int:
         return sum(d.kv_bytes() for d in self._dec.values())

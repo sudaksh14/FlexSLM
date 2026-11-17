@@ -101,11 +101,12 @@ def trace_table(rows, out):
     if not summ:
         return []
     cols = ["policy", "n", "miss_rate", "miss_rate_urgent", "accuracy", "latency_median_ms", "latency_p95_ms",
-            "energy_j_per_answer", "switches", "switch_ms_total", "levels_used"]
+            "energy_j_per_answer", "switches", "switch_ms_total", "capture_ms_total", "levels_used"]
     table = [{"policy": s["policy"], "n": s["n"], "miss_rate": s["miss_rate"], "miss_rate_urgent": s["miss_rate_urgent"],
               "accuracy": s["accuracy"], "latency_median_ms": _g(s, "latency_ms", "median"),
               "latency_p95_ms": _g(s, "latency_ms", "p95"), "energy_j_per_answer": s.get("energy_j_per_answer"),
               "switches": s["switches"], "switch_ms_total": s["switch_ms_total"],
+              "capture_ms_total": s.get("capture_ms_total"),
               "levels_used": json.dumps(s["levels_used"])} for s in summ]
     with open(os.path.join(out, "trace.csv"), "w", newline="") as f:
         wr = csv.DictWriter(f, fieldnames=cols)

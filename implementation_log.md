@@ -1012,3 +1012,15 @@ max_seq 3072):
   construction and CUDA-graph capture (~100-230 ms) inside that request's latency (visible as "switch_ms" of
   fixed policies); warm every (width, bucket) before the measured stream. Not fixed yet (user asked to commit once
   validation passed). Energy/power/thermal paths are untested until the board (rails absent here: recorded as None).
+- **Warm-up artifact fixed and revalidated (28341, node207, all required checks pass):** `bench_widths` and `bench_trace`
+  now build views, KV caches and CUDA graphs for every (width, cache-length bucket) the questions need BEFORE the measured
+  block (`GraphDecoder.warmup`, `ElasticDecoders.prepare_all`, `prepare()` on the proxies; `prepare_ms` / a `warmup`
+  record are logged). Trace: fixed policies now show 0.3 ms switch and 0 ms capture (was 117-233 ms), elastic 8.3% missed
+  vs fixed:max 8.3% / fixed:min 0% on this A10 (deadlines are derived from the profile, so the toy numbers mean little),
+  reload 45.8% missed; the reload path reports graph capture of the freshly loaded model separately (`capture_ms`,
+  4.1 s over 7 reloads). Test added (33 pass).
+  **Open risk for the board:** prefill is eager and launch-bound. TTFT on the A10 is flat (~34 ms) from 100 to 900 prompt
+  tokens and varies ~34 <-> ~56 ms between blocks/runs (28340 vs 28341, levels 1-2 only) without any change in decode
+  speed: host-side jitter, cause not found. On the Orin's slower CPU, TTFT may be dominated by launch overhead and
+  hide the width effect. Mitigations if the board shows it: interleave and repeat width blocks (compare), report prefill
+  also at long prompts, or CUDA-graph the prefill at bucketed prompt lengths. Decode (graph) is not affected.

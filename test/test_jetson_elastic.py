@@ -142,3 +142,19 @@ def test_length_buckets_pick_the_smallest_cache_that_fits():
     ref = workload.timed_greedy(e.width(1), ids, 6, eos=[100])["new_ids"]
     assert decs.get(1).generate(ids, 6, eos=[100])["new_ids"] == ref
     assert set(decs._dec) == {(2, 512), (1, 512)}                    # only the bucket that was needed
+
+
+def test_warmup_builds_everything_a_request_needs_and_leaves_outputs_unchanged():
+    from mednest_jetson.decode import ElasticDecoders
+    e = el.ElasticModel.from_widths(_full(), WIDTHS)
+    decs = ElasticDecoders(e, max_len=1024, use_graph=False)
+    ids = torch.randint(0, 100, (1, 9))
+    refs = {l: workload.timed_greedy(e.width(l), ids, 6, eos=[100])["new_ids"] for l in range(3)}
+    assert decs.prepare_all([9 + 6, 600], levels=[0, 1, 2]) >= 0
+    built = set(decs._dec)
+    assert built == {(l, b) for l in range(3) for b in (512, 1024)}      # every width x every needed length
+    assert all(d.warm for d in decs._dec.values())
+    assert decs.get(1).prepare(15) == 0.0                                  # already warm: nothing left to pay
+    for l in range(3):                                                     # the warm-up step left no trace
+        assert decs.get(l).generate(ids, 6, eos=[100])["new_ids"] == refs[l]
+    assert set(decs._dec) == built                                         # and the requests built nothing new

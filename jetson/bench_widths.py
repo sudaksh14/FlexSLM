@@ -54,6 +54,11 @@ def run_block(w, args, target: dict, model, tokenizer, rows, idle_w, extra: dict
     from nestbench.timing import gpu_clock_hz, memory_snapshot, reset_peak_memory
 
     cd = cooldown(args)
+    prepare_ms = 0.0
+    if decoder is not None:   # views, caches and CUDA graphs for every cache length these questions need
+        needs = {wl.encode(tokenizer, wl.prompt_for(r, target["fmt"], tokenizer), target["fmt"], "cpu").shape[1]
+                 + target["max_new"] for r in rows}
+        prepare_ms = sum(decoder.prepare(n) for n in sorted(needs))
     for r in rows[:args.warmup]:                                   # warm-up: not recorded
         wl.answer(model, tokenizer, r, target["fmt"], min(target["max_new"], 32), args.device, decoder)
     reset_peak_memory()
@@ -75,7 +80,7 @@ def run_block(w, args, target: dict, model, tokenizer, rows, idle_w, extra: dict
     net = (gross - idle_w * pw["duration_s"]) if (gross is not None and idle_w is not None) else None
     summ = {
         "kind": "summary", "target": target["name"], "fmt": target["fmt"], "max_new_tokens": target["max_new"],
-        **extra, "n": len(recs), "wall_s": wall_s, "decoder": args.decode,
+        **extra, "n": len(recs), "wall_s": wall_s, "decoder": args.decode, "prepare_ms": prepare_ms,
         "kv_cache_bytes": decoder.kv_bytes() if decoder is not None else None,
         "accuracy": wl.accuracy_by_source(recs),
         "ttft_ms": stat_block([x["ttft_ms"] for x in recs]),
