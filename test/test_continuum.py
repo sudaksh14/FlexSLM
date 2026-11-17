@@ -286,3 +286,23 @@ def test_all_mednest_configs_log_into_one_wandb_project():
     for name in names:
         proj = resolve_from_str(f"flexllama,{name}").training_context.wandb_project_name
         assert wandb_target(proj) == (MEDNEST_PROJECT, proj), name
+
+
+def test_full_width_control_is_the_final_recipe_on_the_full_width_only():
+    # User, 2026-11-17: PMC recovery + Stage-2 KD on the full width alone (no nesting), 1 GPU.
+    from training.run_experiment import resolve_from_str
+    from training.stage1 import FINAL_ANCHORS
+    full = resolve_from_str("flexllama,s1.qwen3_0p6b.full")
+    ctl = resolve_from_str("flexllama,s1.qwen3_0p6b.full.indep_full")
+    c, f = ctl.training_context, full.training_context
+    assert c.train_levels == (FINAL_ANCHORS[2],) == (8,)
+    for k in ("train_tokens", "lr", "kd_lambda", "gradient_clip_val", "seed"):
+        assert getattr(c, k) == getattr(f, k), k
+    assert ctl.model_config.pretrained_hf_model == full.model_config.pretrained_hf_model
+    s2 = resolve_from_str("flexllama,sft.paper.qwen3_0p6b_indep_full").training_context
+    m3 = resolve_from_str("flexllama,sft.paper.qwen3_0p6b_nested").training_context
+    assert s2.train_levels == [8] and s2.load_from == "flexllama,s1.qwen3_0p6b.full.indep_full"
+    assert (s2.teacher_hf_model, s2.kd_lambda, s2.lr, s2.micro_batch_size) == \
+           (m3.teacher_hf_model, m3.kd_lambda, m3.lr, m3.micro_batch_size)
+    bs = lambda ctx: ctx.loader_function.keywords["batch_size"]
+    assert bs(s2) == 2 * bs(m3) == 32  # 1 GPU x 32 = 2 GPUs x 16

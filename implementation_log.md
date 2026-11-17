@@ -966,3 +966,11 @@ max_seq 3072):
   better). 364M vs 0.5B Apollos w/o Calc: level (p 0.65-0.97). Our MedCalc advantage is in-distribution (its train split is
   in medmix). Paper: "Comparison with Apollo" paragraph now uses these numbers (14 pages; length left to the user).
   Untrained Qwen3-0.6B (1,024 tokens, reasoning) w/o Calc = 26.8: above our 364M width (but ~30x the generated tokens).
+- **I1 full-width control queued (user, 2026-11-17), all on node206:** `s1.qwen3_0p6b.full.indep_full` (final Stage-1 recipe,
+  100M tokens, only the full width / grid level 8 trained) **28330** (afterany 28206, 20 h limit) -> continuum (PMC ppl)
+  **28331** -> Stage 2 `sft.paper.qwen3_0p6b_indep_full` (_S2 = KD 0.5 from the fine-tuned 1.7B, train_levels [8], 1 GPU x
+  batch 32, micro-batch 8 -> same effective batch 32 and 1,044 steps as the 2-GPU runs) **28332** (10 h limit) -> export
+  **28333** (node206, no GPU) -> eval level8 **28334**. Purpose: separates the gain of nesting from the gain of PMC
+  recovery + distillation (MedNest 596M 29.8 vs conventional FT 23.1). Estimate: Stage 1 ~6-8 h (indep_l0/l1 took 4.2 / 5.0 h
+  on node206), Stage 2 ~3-4 h, eval 3 min -> result ~20 h from now (node206 frees at ~03:30 on 11-18). Test added (84 pass).
+  Paper: Table `tab:main` row "Independent (596M)" (\tbd), baseline (iii) text covers the full width.

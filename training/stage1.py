@@ -321,6 +321,13 @@ def register_stage1_configs(configs: dict) -> None:
         flex[f"s1.qwen3_0p6b.full.indep_l{lvl}"] = make_stage1(
             S1_FULL_TOKENS, f"MedNest_s1_indep_l{lvl}", ordering=FINAL_ORDERING,
             **dict(FINAL_S1, train_levels=(FINAL_ANCHORS[lvl],)))
+    # I1 full width (user, 2026-11-17): the same recipe with only the full width (596M) trained, i.e.
+    # PMC recovery + Stage-2 KD without nesting. Separates the gain of nesting from the gain of the
+    # extra domain data and distillation (MedNest 596M vs conventional FT). Runs on node206 (1 GPU):
+    # Stage 1 uses a global batch, so 1 GPU takes the same steps.
+    flex["s1.qwen3_0p6b.full.indep_full"] = make_stage1(
+        S1_FULL_TOKENS, "MedNest_s1_indep_full", ordering=FINAL_ORDERING,
+        **dict(FINAL_S1, train_levels=(FINAL_ANCHORS[2],)))
     # A1: the final recipe without importance ordering (Stage 2: ...nested.no_order). Only
     # meaningful if the pilots choose an ordering; if FINAL_ORDERING stays "none", A1 is
     # reported from the order_* pilots instead and this config is not run.

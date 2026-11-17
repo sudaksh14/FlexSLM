@@ -156,6 +156,10 @@ SFT_RUNS = [
         train_levels=[0], wandb_project_name="MedNest_i1_indep_l0")),
     ("sft.paper.qwen3_0p6b_indep_l1", "s1.qwen3_0p6b.full.indep_l1", dict(_S2,
         train_levels=[4], wandb_project_name="MedNest_i1_indep_l1")),
+    # I1 full width: Stage 2 of s1.qwen3_0p6b.full.indep_full on ONE GPU (node206), so 32 sequences per
+    # GPU (micro-batch 8 as on 2 GPUs): the same effective batch 32 and 1,044 steps as every _S2 run.
+    ("sft.paper.qwen3_0p6b_indep_full", "s1.qwen3_0p6b.full.indep_full", dict(_S2,
+        train_levels=[8], batch_size=32, wandb_project_name="MedNest_i1_indep_full")),
     # Early signal (2026-11-16): Stage 2 on the best 20M Stage-1 pilot (Minitron ordering, lr 2e-4,
     # three levels), with and without KD from the fine-tuned 1.7B.
     ("sft.pilot.qwen3_0p6b_nested", "s1.qwen3_0p6b.pilot.order_minitron_lr2e-4", dict(_S2,
