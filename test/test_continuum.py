@@ -236,20 +236,53 @@ def test_memopt_kd_trainer_with_kd0_needs_no_teacher_and_equals_ce():
 def test_independent_baselines_train_one_level_with_the_final_recipe():
     import types as _t
     from training.run_experiment import resolve_from_str
-    from training.stage1 import FlexLMStage1Trainer
+    from training.stage1 import FINAL_ANCHORS, FlexLMStage1Trainer
     full = resolve_from_str("flexllama,s1.qwen3_0p6b.full")
-    for lvl in (0, 1):
-        s1 = resolve_from_str(f"flexllama,s1.qwen3_0p6b.full.indep_l{lvl}")
+    # indep_l0 / indep_l1 are the 0.5 and 0.75 widths: grid levels 0 and 4 of the final 9-width model.
+    assert [list(full.model_config.hidden_dims)[a] for a in FINAL_ANCHORS] == [512, 768, 1024]
+    for name, lvl in ((0, FINAL_ANCHORS[0]), (1, FINAL_ANCHORS[1])):
+        s1 = resolve_from_str(f"flexllama,s1.qwen3_0p6b.full.indep_l{name}")
         c = s1.training_context
         assert c.train_levels == (lvl,)
         assert c.train_tokens == full.training_context.train_tokens and c.lr == full.training_context.lr
         assert c.kd_lambda == full.training_context.kd_lambda
         assert s1.model_config.pretrained_hf_model == full.model_config.pretrained_hf_model
         assert list(s1.model_config.hidden_dims) == list(full.model_config.hidden_dims)
-        fake = _t.SimpleNamespace(training_context=c, submodel=_t.SimpleNamespace(max_level=lambda: 2))
+        fake = _t.SimpleNamespace(training_context=c, submodel=_t.SimpleNamespace(max_level=lambda: 8))
         for stage in ("train", "val"):
             assert FlexLMStage1Trainer._select_levels(fake, stage) == [lvl]
-        s2 = resolve_from_str(f"flexllama,sft.paper.qwen3_0p6b_indep_l{lvl}").training_context
+        s2 = resolve_from_str(f"flexllama,sft.paper.qwen3_0p6b_indep_l{name}").training_context
         m3 = resolve_from_str("flexllama,sft.paper.qwen3_0p6b_nested").training_context
-        assert s2.train_levels == [lvl] and s2.load_from == f"flexllama,s1.qwen3_0p6b.full.indep_l{lvl}"
+        assert s2.train_levels == [lvl] and s2.load_from == f"flexllama,s1.qwen3_0p6b.full.indep_l{name}"
         assert (s2.teacher_hf_model, s2.kd_lambda, s2.lr) == (m3.teacher_hf_model, m3.kd_lambda, m3.lr)
+
+
+def test_stage2_loads_stage1_weights_despite_longer_rope_tables():
+    # Stage 1 trains with max_seq_length 1,024, SFT with 3,072: the RoPE tables (buffers in the
+    # state dict) differ in length, every weight must still load, and a real mismatch must fail.
+    from training.sft import load_trained_weights
+    short = _model(_cfg(), seed=1)
+    long = _model(dataclasses.replace(_cfg(), max_seq_length=96), seed=2)
+    load_trained_weights(long, short.state_dict())
+    for (n, a), (_, b) in zip(short.named_parameters(), long.named_parameters()):
+        assert torch.equal(a, b), n
+    ids = torch.randint(0, V, (2, 32))
+    for lvl in range(3):
+        short.set_level_use(lvl), long.set_level_use(lvl)
+        assert torch.allclose(short(ids), long(ids), atol=1e-5)
+    bad = {k: v for k, v in short.state_dict().items() if "layer_0.mlp" not in k}
+    with pytest.raises(RuntimeError):
+        load_trained_weights(long, bad)
+
+
+def test_all_mednest_configs_log_into_one_wandb_project():
+    # User, 2026-11-17: one W&B project "MedNest"; the config's own name becomes group + tag.
+    from config.wandb import MEDNEST_PROJECT, wandb_target
+    from training.run_experiment import resolve_from_str
+    from training.sft import SFT_RUNS
+    assert wandb_target("FlexLLaMA_fineweb") == ("FlexLLaMA_fineweb", None)
+    names = [r[0] for r in SFT_RUNS if r[0].startswith(("sft.paper.", "sft.pilot.", "sft.diag."))]
+    names += ["s1.qwen3_0p6b.full", "s1.qwen3_0p6b.pilot.final", "s1.qwen3_1p7b.full"]
+    for name in names:
+        proj = resolve_from_str(f"flexllama,{name}").training_context.wandb_project_name
+        assert wandb_target(proj) == (MEDNEST_PROJECT, proj), name

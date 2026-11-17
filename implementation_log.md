@@ -746,3 +746,200 @@ max_seq 3072):
   28183 (node206) and the pending 28168, 28171, 28173, 28175, 28177, 28179, 28181, 28185, 28187, 28189. Not touched
   (changing a running job's CPUs is not possible; cancelling the chain to resubmit is not worth it for a throughput-only
   effect unless the user wants it).
+
+### 2026-11-16
+- **State:** DAS-6 queue empty, every job of the 2026-11-12 queue finished (28150-28190). Hipster: checks done
+  (391242-391244 on capacity, 391237-391239 on performance, same results); only the 4-GPU S1 memory smoke 391246 is
+  still pending (est. start 2026-11-18). `migrate_to_home.sbatch` on hipster still NOT run (waits for 391246).
+- **B1 (28150 -> 28151 -> 28152), conventional SFT Qwen3-0.6B, unclipped, 32 tokens:** MedQA 27.9, MCQA 33.2, HeadQA 28.0,
+  Calc 23.8, Bullets 26.2, Pro-H 12.7, Xpert 9.7 = **avg 23.1**, 0% unboxed. **Only 1-8 points above the uniform-guess
+  rate on every multiple-choice set**; only MedCalc shows clear learning. This is the ceiling for every width of the
+  0.6B family under the answer-only protocol => an accuracy-vs-width curve on 0.6B will be nearly flat. Main risk for
+  the paper (see "Assessment" below). Untrained 0.6B at 32 tokens: 1.2% (unboxed); at 1,024 tokens NOT run yet.
+- **Stage-1 round 2 + KD + ordering + continuum pilots (20M tokens; final eval ppl at 0.5 / 0.75 / 1.0; `results/continuum.*.json`;
+  values marked (log) are the last val ppl logged during training, ~1% higher):**
+  order_minitron 15.7/10.4/7.49 · **order_minitron_lr2e-4 13.5/9.73/7.63 (best small levels)** · order_taylor_lr2e-4
+  14.1/9.94/7.71 (log) · order_taylor_lr2e-4_noclip 17.1/10.9/7.61 (log) · noclip 22.0/13.0/7.56 (log; base 17.4/11.3/7.54)
+  => **clipping at 1.0 HELPS Stage 1** (opposite of Stage 2) · kd0 (CE only) 15.5/10.4/6.97 · T1 (tau 1) 15.0/10.2/7.11 ·
+  kd_corrected 15.3/10.2/**6.92** · kd1_corrected 18.3/11.4/7.29 · level_norms 17.1/11.2/7.48 · mod_scale 17.0/11.2/7.48 ·
+  mod_scale_shift 17.0/11.2/7.48 · grid9_anchors_plus1 17.1/11.2/7.56 with all 9 widths monotone
+  (17.1, 16.6, 14.7, 12.8, 11.2, 10.8, 9.8, 8.6, 7.6).
+  Corrected teacher (28168, Qwen3-1.7B + 20M PMC tokens): PMC ppl 7.92 -> **5.57**. Ordering cost on one A10, 262k tokens:
+  Minitron 43.7 s / 2.5 GB, Taylor 99.9 s / 5.2 GB; untrained ppl after Minitron ordering 4,658 / 998 / 10.6.
+  Conclusions (one seed): (1) KD from the uncorrected teacher HURTS (base 17.2/11.2/7.49 vs CE-only 15.5/10.4/6.97);
+  corrected-teacher KD 0.5 is on par with / marginally better than CE only (1-2%, not resolvable with one seed); pure KD
+  is worse even with the corrected teacher. (2) Minitron ordering > Taylor > original after recovery, and cheapest.
+  (3) Continuum: anchors + 1 random width (method 2) is the only method that works; per-width norms and LLaMaFlex modulation
+  do nothing (within 5%, still non-monotone). (4) Untested combination = the natural final recipe: minitron + lr 2e-4 +
+  clip 1.0 + corrected teacher KD 0.5 (or CE only) + tau 1 or 2 + grid9 anchors + 1.
+- **Hipster checks:** warm start matches HF under transformers 4.57.6; Qwen3-1.7B PMC ppl 7.918 (= DAS-6).
+  **II-Medical-8B: PMC ppl 7.455** (Qwen3-1.7B 7.92; our corrected 1.7B 5.57) and **0% boxed answers at 32 tokens**
+  (no_boxed ~100% on all 7 sets, both runs). => as it is, II-Medical-8B is a poor teacher for the 1.7B backbone: on PMC it
+  is barely better than the untrained 1.7B student (Stage 1 would repeat the "teacher worse than student" failure), and for
+  Stage 2 it does not produce the answer-only format (same reason the untrained 1.7B could not be the Stage-2 teacher).
+  Needs a user decision before any S1 training (see proposals).
+- **CFP (i-somet.org/iea-aie2027/cfp.html, read 2026-11-16):** deadline 2026-12-15, long paper 12 pages incl. references,
+  LNCS/LNAI, double-blind, CMT; criteria originality, significance, technical merit, clarity; scope "applications of
+  applied intelligent systems to solve real-life problems" incl. medicine; special session iSeA covers e-health; best
+  papers -> Applied Intelligence special issue. An applied venue: the on-device (Jetson) part is central to the fit.
+- **Assessment given to the user:** not enough for acceptance yet. Have: Stage-1 study (27 variants), continuum, cost
+  comparison, clipping finding, B1, 1.7B conventional + naive nested (student). Missing: every MedNest accuracy number
+  (Stage 2 never run), independent + MatFormer baselines, all Jetson measurements. Risk: 0.6B answer-only ceiling 23.1.
+- **Proposals (waiting for user decisions, nothing submitted):**
+  P1 run Stage 2 NOW on the best 20M pilot checkpoint (order_minitron_lr2e-4) + A2 no_stage1 + B0 untrained 0.6B at
+     1,024 tokens: ~1 day of node205, tells whether accuracy separates the widths at 0.6B before 100M tokens are spent;
+  P2 make the 1.7B backbone the accuracy backbone on DAS-6 node205 (2 x A40) instead of hipster (queue estimate is after
+     the deadline): Stage-1 with CE only or the corrected 1.7B teacher... conflicts with "teacher always bigger": decision;
+  P3 Jetson measurements now (depend only on shapes, not on trained weights): 9 widths, switch time vs reload, power
+     modes, memory under a co-running workload; a budget-trace experiment (deadline-miss rate, fixed vs elastic);
+  P4 novelty at zero training cost from per-question outputs: confidence-gated width escalation (cascade inside one
+     model), cross-width answer consistency (nested vs independent), per-width calibration;
+  P5 three seeds for the main Stage-2 rows only (2.6 h each) -- conflicts with the one-seed decision: decision.
+- **Paper rewritten at the user's request (2026-11-16)** around elastic inference; `paper/main.tex`, 12 pages, compiles,
+  no undefined refs; previous version `paper/main_backup_2026-11-11.tex` (+ `references_backup_2026-11-11.bib`);
+  draft PDF refreshed. New: abstract, introduction (three kinds of budget variation: across devices, over time, between
+  requests), contributions, Sect. 3.5 "Elastic inference on the device", Sect. 5.1 Stage-1 study + Table `tab:stage1`
+  (15 rows, real numbers), Sect. 5.2 continuum + pgfplots Fig. `fig:continuum`, B1 row in `tab:main`, clipping result
+  (30.6 vs 36.8) and generation-budget lesson, level shapes/params (188M/364M/596M). Removed to fit 12 pages: Table
+  `tab:reference`, the medical half of `tab:cost`, the separate ablation table (Stage-2 ablations become rows of
+  `tab:main`), 11 citations. New bib entry `sreenivas2024minitronpractice` (VERIFY authors). The paper now states that
+  activation (Minitron) ordering is the final choice: **`FINAL_ORDERING` in code is still "none" and the user has not
+  signed off**. 15 `\tbd` remain (all Stage-2 accuracy, Jetson, GPU-hours, untrained 0.6B). Fonts: T1 without cm-super
+  makes MiKTeX build bitmap EC fonts (was already the case); fix before submission (e.g. install cm-super).
+
+### 2026-11-16 (later): FINAL RECIPE fixed, final runs submitted
+- **User decisions:** (1) Minitron activation ordering is the final ordering; (2) no teacher for the 1.7B backbone,
+  train with CE only; (3) seeds: asked what they would verify (answer in "Seeds" below; no extra seeds for now);
+  (4) run Stage 2 on the best 20M pilot now, plus the other next actions; Jetson experiments at the very end
+  (inference only, about one day).
+- **FINAL CONFIG AND TRAINING SETTINGS (MedNest, Qwen3-0.6B).** Code: `importance_order.FINAL_ORDERING`,
+  `stage1.FINAL_S1`, `sft._PAPER` / `sft._S2`.
+
+  | Item | Final setting | Evidence (20M pilots, PMC val ppl at 0.5 / 0.75 / 1.0 width) |
+  |---|---|---|
+  | Backbone / widths | Qwen3-0.6B; 9-width grid, hidden 512...1024 in steps of 64 (1/16), FFN 1536...3072, heads 8,8,10,12,12,12,14,16,16 (GQA ratio 2), depth 28 and head dim 128 fixed; anchors = grid levels 0 / 4 / 8 = 188M / 364M / 596M | grid9_anchors_plus1: all nine widths monotone (17.1 ... 7.6), anchors unchanged |
+  | Ordering | Minitron activation magnitude (MLP channels, KV groups, hidden channels), 512 x 512 PMC tokens, `hf_export/qwen3-0.6b.minitron` | 13.5 / 9.73 / 7.63 vs Taylor 14.1 / 9.94 / 7.71 vs original 14.6 / 10.4 / 7.66 (all lr 2e-4); 44 s vs 100 s |
+  | Stage 1 data / budget | PMC OA commercial subset, random 1,024-token windows, **100M tokens**, 32 sequences per step (32,768 tokens), 3,051 steps | pilots: 20M |
+  | Stage 1 loss | **CE only** (kd_lambda 0, no teacher) | base KD 0.5 from Qwen3-1.7B 17.2 / 11.2 / 7.49 vs CE only 15.5 / 10.4 / 6.97; corrected teacher 15.3 / 10.2 / 6.92 (within 1-2% of CE only); pure KD worse |
+  | Stage 1 optimiser | AdamW (fused), **lr 2e-4**, weight decay 0, 1% linear warm-up + cosine to 0, **gradient clipping 1.0**, fp32 weights / bf16 autocast, micro-batch 4 | lr 2e-4: L0 17.2 -> 14.6; no clipping: 22.0 / 13.0 / 7.56 (worse) |
+  | Stage 1 levels per step | the 3 anchors + 1 random grid width (seeded by seed and step), equal level weights | one level per step 21.1 / 12.8 / 8.14; level weighting within 3% (noise); per-width norms and modulation: no effect |
+  | Stage 2 data | medmix SFT: 33,406 train / 500 val, answer-only target in `\boxed{}`, thinking disabled, max 3,072 tokens | |
+  | Stage 2 optimiser | AdamW, lr 5e-5, 1% warm-up + cosine, 1 epoch = 1,044 steps, effective batch 32 (16 per GPU x 2 A40), micro-batch 8, **no gradient clipping** | clipped 1.7B fine-tune 30.6 vs unclipped 36.8 |
+  | Stage 2 loss | CE on answer tokens; **KD: decided by the runs below** (KD 0.5, T 2 from the fine-tuned Qwen3-1.7B over all tokens, vs CE only) | not measured yet |
+  | Stage 2 levels per step | 3 anchors + 1 random grid width, equal weights | |
+  | Seed | 0 everywhere | |
+  | Evaluation | greedy, 32 new tokens, last `\boxed{}`; untrained backbones 1,024 new tokens | |
+
+  Qwen3-1.7B backbone: the same recipe (Minitron ordering -> `hf_export/qwen3-1.7b.minitron`, 9-width grid hidden
+  1024...2048, anchors about 0.5B / 1.0B / 1.7B, Stage 1 100M tokens CE only lr 2e-4 clip 1.0 micro-batch 2,
+  Stage 2 CE only micro-batch 4), **no teacher in either stage**, on DAS-6 node205 (2 x A40, plain AdamW; ZeRO-1 and
+  hipster no longer needed). The combination ordering + lr 2e-4 + CE only + grid was never run together: the 20M
+  run `s1.qwen3_0p6b.pilot.final` tests it and gates the 100M run.
+  Interpretation to confirm with the user: "CE only" was said about the 1.7B teacher. Applied as: 1.7B = CE only in
+  both stages; 0.6B Stage 1 = CE only (the pilots support it); 0.6B Stage 2 = both variants run, the better one
+  becomes the main row and the other the A3 ablation.
+- **Seeds (answer to the user):** repeats verify one thing only: that a difference between two rows is larger than
+  the run-to-run variation of training (data order, sampled widths). Not needed for large effects (recovery
+  4,996 -> 13.5, clipping 30.6 vs 36.8, one-level-per-step). Needed only for claims resting on small gaps: KD vs CE
+  only (1-2%), level weighting, and, if it turns out close (< ~2 points), MedNest vs the independent models and vs
+  conventional fine-tuning. Decision: stay with one seed; revisit only if the main comparison comes out that close
+  (3 Stage-2 repeats of the two rows involved, ~2-3 h each).
+- **Code:** `FINAL_ORDERING = "minitron"`; `ORDERED_BY_PRESET` + `start_weights(..., preset=)` (1.7B ordered
+  checkpoint); `FINAL_S1 = dict(lr=2e-4, kd_lambda=0.0, fractions=FRACTIONS_9, anchor_levels=(0, 4, 8),
+  num_levels_per_step=4)`, `FINAL_ANCHORS`; new `s1.qwen3_0p6b.pilot.final`; independent baselines train grid levels
+  0 and 4; `w025` no longer takes the grid; `S1_1P7B` without teacher / ZeRO-1; `SFTTrainingContext.anchor_levels`;
+  `_S2` trains anchors + 1 random width (3-level models still train every level); new
+  `sft.pilot.qwen3_0p6b_nested[.no_kd]`; `sft.paper.qwen3_1p7b_nested` CE only. 81 local tests pass
+  (`test_experiment_banner.py` fails at import, as before this change). The Stage-2 `w_*` configs (A4) are NOT valid
+  for the 9-width model (fixed weights have 3 entries): A4 is reported from the Stage-1 pilots only.
+- **Jobs (`scripts/das6/queue_2026-11-16.sh`, ids in `jobs/queue_2026-11-16.ids`; submitted 2026-11-16):**
+  node207: **28200** B0 untrained Qwen3-0.6B, 1,024 new tokens. node208: **28201** Minitron ordering of Qwen3-1.7B.
+  node206 (1 GPU): **28202** `s1.qwen3_0p6b.pilot.final` (20M) -> continuum 28203; then 100M Stage-1 runs
+  indep_l0 **28204**, indep_l1 **28205**, no_order **28206**.
+  node205, in order: **28207** Stage 2 on pilot order_minitron_lr2e-4 with KD (export 28208, eval L0-2 28209-28211);
+  **28212** same, CE only (28213, 28214-28216); **28217** A2 no Stage 1 (28218, 28219-28221); **28222** B2
+  MatFormer-style (28223, 28224-28226); **28227** 1.7B Stage-1 smoke (20 steps); **28228 FINAL Stage 1, 100M**
+  (afterok 28202; continuum 28229); **28230** M3 final Stage 2 with KD (28231, eval levels 0-8 28232-28240);
+  **28241** M3 CE only (28242, 28243-28251); **28252** indep 0.5 Stage 2 (28253, eval level0 28254); **28255** indep
+  0.75 Stage 2 (28256, eval level4 28257); **28258** A1 no-ordering Stage 2 (28259, eval 0/4/8 28260-28262);
+  **28263** 1.7B Stage 1, 100M (afterok 28227, afterany 28241; 140 h limit, estimate ~55 h).
+  Exports run on node208 (defq, no GPU): fatq node201-203 are held by another user's 15-day jobs.
+  Not queued: 1.7B Stage 2 (after 28263), Jetson, continuum eval of no_order.
+  Estimates: Stage-2 runs ~2 h each; pilot final ~7 h; 100M on node205 ~18 h; first 0.6B accuracy numbers
+  (28209-28216) within ~5 h of submission, final 0.6B table in ~1.5 days.
+- **Hipster:** 391246 (II-Medical-8B smoke) cancelled, nothing of ours queued there any more.
+  `scripts/hipster/migrate_to_home.sbatch` can run now; not submitted (hipster is no longer needed for the paper:
+  ask the user whether to migrate or simply delete `/scratch/skalra/flexslm` there).
+- **Jetson comparison candidates** (checked on the Hugging Face hub 2026-11-16; Orin Nano 8 GB has 7.4 GB usable,
+  fp16 fits up to about 3B parameters):
+  fp16, direct: Qwen3-0.6B, Qwen3-1.7B (our backbones, conventional FT = B1 / E_A), Apollo-0.5B, Apollo-1.8B,
+  Apollo-2B, Apollo2-0.5B (medical, Apache-2.0, open), SmolLM2-360M / 1.7B (general); gated but available:
+  Gemma 3n E2B (the only released nested model), Gemma 3 270M / 1B, MobileLLM-600M.
+  Only with 4-bit quantisation (3.8-4.5B): MedMobile (KrithikV/MedMobile, MIT), MedGemma-4B (gated),
+  Llama-3.1-Minitron-4B-Width (pruned + distilled). Too large for the board: BioMistral-7B, Meditron-7B,
+  PMC-LLaMA-13B, Mistral-NeMo-Minitron-8B, Nemotron-Elastic-12B, II-Medical-8B.
+  No checkpoints: FaithMed, Flextron, LLaMaFlex, MatFormer language models.
+  Note: the hub's parameter counts for Qwen3 count the tied embedding twice (0.75B / 2.03B).
+- **Paper TODO (not edited after this entry):** Sect. 3.4 Stage 1 is now CE only without a teacher (text still describes
+  distillation from a larger teacher as the default; Eq. 1 stays for Stage 2); final-recipe row for Table `tab:stage1`
+  from 28202/28203; contribution 2 wording ("teacher must know the domain" -> recovery needs no teacher).
+- **Bug found by 28207 and fixed (same day):** every Stage-2 run that starts from a Stage-1 checkpoint failed at load:
+  the RoPE tables `self_attn.cos_<level>` / `sin_<level>` are buffers in the state dict sized by max_seq_length
+  (Stage 1: 1,024, SFT: 3,072). `training.sft.load_trained_weights`: strict load of every weight, the model keeps its
+  own RoPE tables (they depend on positions only); test in `test/test_continuum.py` (82 local tests pass). 28207
+  failed, 28212 (same config family) and 28217 (A2; cancelled by mistake, it does not load a Stage-1 checkpoint)
+  cancelled with their export/eval jobs 28208-28221. **Resubmitted on node205:** Stage 2 on pilot with KD **28264**
+  (export 28265, eval L0-2 28266-28268) -> CE only **28269** (28270, 28271-28273) -> A2 no Stage 1 **28274** (28275,
+  28276-28278).
+- **Results in, 2026-11-16 ~20:00:**
+  * **B2 MatFormer-style (28222, eval 28224-28226), 0.5 / 0.75 / 1.0 width:** L0 24.9/31.4/25.0/3.1/23.2/13.1/9.6 =
+    **18.6**; L1 27.6/31.5/24.7/14.5/20.1/13.1/10.3 = **20.2**; L2 27.7/32.3/24.4/17.5/21.8/12.3/9.8 = **20.9**
+    (conventional FT 23.1). Multiple-choice sets at the guess rate at every width; only MedCalc separates the widths
+    (3.1 / 14.5 / 17.5; conventional 23.8).
+  * **Minitron ordering of Qwen3-1.7B (28201):** 143.8 s, 6.7 GB on an A10, max logit diff 3.9e-4 ->
+    `hf_export/qwen3-1.7b.minitron`.
+  * **1.7B Stage-1 smoke (28227, 20 steps, 2 x A40, CE only, 4 widths per step):** passed, **36.9 GB peak**, 418 tok/s
+    per rank => 100M tokens in ~33 h if both ranks count (28263 has a 140 h limit).
+  * **pilot final 28202** at step 240/610: val ppl 16.0 / 11.2 / (full not read) on the anchors, all nine widths
+    monotone so far. B0 28200 at 12,000/12,797.
+
+### 2026-11-17
+- **State (16:27):** running: **28230** M3 final Stage 2 with KD (node205, step ~728/1044, ~5.3 h total, 28.9 GB),
+  **28206** A1 Stage 1 no_order 100M (node206, step ~1340/3051, ~18 h total). Done since the last entry: 28200 (B0),
+  28202/28203 (pilot final), 28204/28205 (indep Stage 1, 100M), 28228/28229 (FINAL Stage 1, 100M), 28264-28268
+  (Stage 2 on pilot, KD). Queue order on node205 is now 28230 -> 28241 -> ... with 28269 (pilot CE only) and 28274
+  (A2) pending (Resources) behind it. `sacct` returns nothing on DAS-6 (accounting off): read times from logs.
+- **New results:**
+  * **FINAL Stage 1 (28228, 100M tokens, continuum 28229), PMC val ppl over the 9 grid widths:** 9.02, 8.86, 8.41,
+    7.85, **7.42**, 7.32, 7.07, 6.79, **6.57** (anchors 0.5/0.75/1.0 = 9.02/7.42/6.57; monotone). The half-width
+    model beats the pretrained full Qwen3-0.6B (10.11). Uniform width 0.25 (untrained): 1,579.
+  * **pilot final (28202, 20M, same recipe):** 12.60, 12.19, 11.18, 10.02, 9.18, 8.93, 8.35, 7.73, 7.27 -> anchors
+    12.6/9.18/7.27, better on L0/L1 than every single-change pilot (best was 13.5/9.73).
+  * **B0 untrained Qwen3-0.6B, 1,024 tokens (28200):** 32.5/32.3/42.5/3.5/24.2/19.2/9.8 = **23.4**, 3.6% unboxed
+    (= conventional FT 23.1).
+  * **Stage 2 on pilot order_minitron_lr2e-4, KD (28264, evals 28266-28268), 3 levels:** L2 (596M) 37.9/39.3/45.0/
+    27.5/28.9/18.1/11.6 = **29.8**; L1 (364M) 29.0/33.6/31.6/24.8/26.8/14.2/10.5 = **24.4**; L0 (188M) 25.8/31.9/24.3/
+    21.5/20.8/11.7/10.2 = **20.9** (0% unboxed). Exact McNemar, pooled over 12,797 questions (`eval.compare_paired`):
+    L2 vs conventional FT +7.7 pooled (2,401 vs 1,422 discordant, p<1e-4); L1 vs conventional FT 596M +1.3 (p=0.0017);
+    vs MatFormer-style L2/L1/L0 +9.3/+3.4/+1.7, all p<1e-4. Recovery breaks the 0.6B "ceiling" of 23.1.
+- **Apollo comparison (user question; published numbers, arXiv 2403.03640, Table 3/5):** 3-shot, own prompt, up to 128
+  tokens, regex option extraction; same MedQA (1,273) / MedMCQA val (4,183) test sets. Apollo-0.5B (Qwen-0.5B) 33.0 /
+  37.8, Apollo-1.8B (Qwen-1.8B) 42.2 / 45.0, Apollo-2B (Gemma-2B) 38.3 / 42.0 (MMLU-medical 45.9 / 49.1 / 52.9); 2.5B
+  tokens of ApolloCorpora. MedNest pilot 596M (zero-shot, 32 tokens, 33M training tokens): 37.9 / 39.3 -> above
+  Apollo-0.5B, below 1.8B/2B; our 364M 29.0/33.6 and 188M 25.8/31.9 are below Apollo-0.5B. Apollo2-0.5B/2B numbers
+  exist only as images on the HF cards (not read). Not run in our pipeline (would need ~1,024 tokens: they do not
+  answer in `\boxed{}`); proposal to the user.
+- **Paper updated at the user's request** (backup `paper/main_backup_2026-11-16.tex` + bib): Stage 1 = CE only,
+  final-recipe description; Table `tab:stage1` + rows "final 20M" and "same, 100M"; Fig. `fig:continuum` + 100M curve;
+  Table `tab:main` filled: untrained 0.6B, MatFormer-style x3, MedNest pilot x3 (+ McNemar text), final row \tbd;
+  Apollo reference paragraph; abstract/contribution 2 numbers; generation-budget lesson + 0.6B. 13 pages: the user
+  will handle length/formatting at the end (do not trim; content cut for length was restored).
+- **W&B: one project `MedNest` (user).** `config/wandb.py` `wandb_target()`: every `MedNest_*` project name ->
+  project `MedNest`, old name = group + tag (trainer.py; configs unchanged; test in test_continuum.py; 83 local tests
+  pass). Synced to DAS-6 16:3x: pending jobs (28241, 28252, 28255, 28258, 28263, 28269, 28274, ...) log into MedNest;
+  running 28230/28206 untouched (they stay in MedNest_s2_nested / MedNest_s1_full_no_order: copy them with
+  `scripts/das6/wandb_to_mednest.sbatch` once finished). Existing runs: `wandb sync -p MedNest` does NOT work for
+  online-logged runs (28305: prints "done", uploads nothing; cancelled) -> `scripts/wandb_to_mednest.py` copies via
+  the API (config + full history at the same steps + summary, same id/name, group/tag = old project,
+  `copied_from(_created_at)` in config; old projects untouched). Test 28307 (1 run), full copy **28308** (node208).
+  Old per-config projects can be deleted in the W&B UI after checking (not done; ask).

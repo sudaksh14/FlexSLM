@@ -14,6 +14,7 @@ import functools
 import json
 import logging
 import math
+import re
 import os
 import sys
 
@@ -62,7 +63,9 @@ _FT_TEACHER_1P7B = os.path.join(
 # its start weights come from the Stage-1 config named in SFT_RUNS.
 _S2 = dict(_PAPER, hf_preset=None, teacher_hf_model=_FT_TEACHER_1P7B,
            tokenizer_name="Qwen/Qwen3-0.6B", kd_lambda=0.5, kd_temperature=2.0,
-           num_levels_per_step=None)
+           # Final 9-width grid (stage1.FINAL_S1): anchors 0.5 / 0.75 / 1.0 + 1 random width per
+           # step. Models with <= 4 levels (pilots, no_stage1) train every level, as before.
+           anchor_levels=(0, 4, 8), num_levels_per_step=4)
 
 # (new config name, config it starts from, overrides). A start config of None
 # warm-starts from Hugging Face weights instead (see _hf_base).
@@ -148,15 +151,22 @@ SFT_RUNS = [
         kd_lambda=0.0, wandb_project_name="MedNest_s2_no_kd")),
     # I1: independent baselines, Stage 2 of s1.qwen3_0p6b.full.indep_l{0,1}: the same schedule
     # and KD teacher as M3, but only that one level is trained (and exported for evaluation).
+    # (grid levels 0 and 4 = widths 0.5 and 0.75 of the final 9-width model.)
     ("sft.paper.qwen3_0p6b_indep_l0", "s1.qwen3_0p6b.full.indep_l0", dict(_S2,
         train_levels=[0], wandb_project_name="MedNest_i1_indep_l0")),
     ("sft.paper.qwen3_0p6b_indep_l1", "s1.qwen3_0p6b.full.indep_l1", dict(_S2,
-        train_levels=[1], wandb_project_name="MedNest_i1_indep_l1")),
-    # S1 Stage 2 (hipster, 4 GPUs): nested SFT of Qwen3-1.7B from s1.qwen3_1p7b.full, KD from II-Medical-8B,
-    # the paper schedule (effective batch 32 = 8 per GPU x 4), ZeRO-1, smaller micro-batches for the 8B teacher.
+        train_levels=[4], wandb_project_name="MedNest_i1_indep_l1")),
+    # Early signal (2026-11-16): Stage 2 on the best 20M Stage-1 pilot (Minitron ordering, lr 2e-4,
+    # three levels), with and without KD from the fine-tuned 1.7B.
+    ("sft.pilot.qwen3_0p6b_nested", "s1.qwen3_0p6b.pilot.order_minitron_lr2e-4", dict(_S2,
+        wandb_project_name="MedNest_s2_pilot")),
+    ("sft.pilot.qwen3_0p6b_nested.no_kd", "s1.qwen3_0p6b.pilot.order_minitron_lr2e-4", dict(_S2,
+        kd_lambda=0.0, wandb_project_name="MedNest_s2_pilot_no_kd")),
+    # S1 Stage 2 (DAS-6 node205, 2 x A40): nested SFT of Qwen3-1.7B from s1.qwen3_1p7b.full, CE only
+    # (user, 2026-11-16: no teacher for the 1.7B backbone), the paper schedule (16 per GPU x 2 = 32).
     ("sft.paper.qwen3_1p7b_nested", "s1.qwen3_1p7b.full", dict(_S2,
-        teacher_hf_model="Intelligent-Internet/II-Medical-8B", tokenizer_name="Qwen/Qwen3-1.7B",
-        batch_size=8, micro_batch_size=2, zero_optimizer=True, wandb_project_name="MedNest_s1_1p7b_s2")),
+        kd_lambda=0.0, tokenizer_name="Qwen/Qwen3-1.7B", micro_batch_size=4,
+        wandb_project_name="MedNest_s1_1p7b_s2")),
     # Baseline B2: MatFormer-style nested fine-tuning of the same three levels: one
     # uniformly random level per step, CE only, no ordering, no Stage 1, no KD.
     # (MatFormer nests only the FFN, which cannot reach a 0.19B level of Qwen3-0.6B.)
@@ -262,6 +272,8 @@ class SFTTrainingContext(FlexTrainingContext):
     # batch). Exact: losses are normalised over the whole batch.
     micro_batch_size: int = None
     zero_optimizer: bool = False
+    # Levels trained in every step when num_levels_per_step samples (trainer._select_levels).
+    anchor_levels: tuple = None
 
     def __init__(self, load_from: str, teacher_hf_model: str, tokenizer_name: str,
                  kd_lambda=0.5, kd_temperature=2.0, num_levels_per_step=None,
@@ -270,7 +282,8 @@ class SFTTrainingContext(FlexTrainingContext):
                  warmup_ratio=None, activation_checkpointing=False, train_levels=None,
                  level_weighting="none", level_weight_lr=1e-2, level_weight_ema=0.9,
                  level_weights_fixed=None, dwa_window=50, dwa_temperature=2.0,
-                 level_sampling="sandwich", micro_batch_size=None, zero_optimizer=False, **kwargs):
+                 level_sampling="sandwich", micro_batch_size=None, zero_optimizer=False,
+                 anchor_levels=None, **kwargs):
         loader = functools.partial(load_qa_sft, data_dir=data_dir, tokenizer_name=tokenizer_name,
                                    batch_size=batch_size, max_seq_length=max_seq_length)
         FlexTrainingContext.__init__(self, loader, patience=patience, epochs=epochs,
@@ -284,6 +297,7 @@ class SFTTrainingContext(FlexTrainingContext):
         self.warmup_ratio = warmup_ratio
         self.activation_checkpointing = activation_checkpointing
         self.train_levels = train_levels
+        self.anchor_levels = tuple(anchor_levels) if anchor_levels else None
         self.zero_optimizer = zero_optimizer  # ZeRO-1 (training.trainer.adamw): 1.7B student + 8B teacher
         check_level_weighting(level_weighting, level_weight_lr, level_weight_ema,
                               level_weights_fixed, dwa_window, dwa_temperature)
@@ -318,6 +332,22 @@ def trained_model_path(config_name: str):
     return utils.resolve_named_path(paths.TRAINED_MODELS, config_name, ".pt")
 
 
+_ROPE_TABLE = re.compile(r"\.self_attn\.(cos|sin)_\d+$")
+
+
+def load_trained_weights(model, state: dict) -> None:
+    """Strict load of a trained FlexLLaMA state dict, except for the RoPE tables
+    (cos_<level> / sin_<level>). Those are buffers computed from the positions alone and
+    sized by max_seq_length, which differs between Stage 1 (1,024) and SFT (3,072), so the
+    model keeps its own (job 28207 failed on exactly this). Every weight must still match."""
+    own = model.state_dict()
+    skipped = [k for k in state if _ROPE_TABLE.search(k) and k in own and own[k].shape != state[k].shape]
+    result = model.load_state_dict({k: v for k, v in state.items() if k not in skipped}, strict=False)
+    if result.unexpected_keys or sorted(result.missing_keys) != sorted(skipped):
+        raise RuntimeError(f"state dict does not match the model: unexpected {result.unexpected_keys[:5]}, "
+                           f"missing {[k for k in result.missing_keys if k not in skipped][:5]}")
+
+
 class FlexLMSFTTrainer(LevelWeightingMixin, FlexLMKDTrainer):
     """FlexLMKDTrainer for question/answer data. The KD term is FlexSLM's own: over
     every real token, as in FlexLMKDTrainer, with the same lambda and T. Only CE is
@@ -331,7 +361,7 @@ class FlexLMSFTTrainer(LevelWeightingMixin, FlexLMKDTrainer):
         if self.training_context.load_from is None:
             return
         path = trained_model_path(self.training_context.load_from)
-        self.submodel.load_state_dict(torch.load(path, map_location="cpu"))
+        load_trained_weights(self.submodel, torch.load(path, map_location="cpu"))
         logging.info(f"SFT: loaded starting weights from {path}")
 
     def handle_pretrained_hf(self):

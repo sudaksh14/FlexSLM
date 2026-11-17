@@ -20,6 +20,7 @@ from networks.config import ModelConfig, FlexModelConfig
 import config.hardware as hardware
 import config.paths as paths
 import config.wandb
+from config.wandb import wandb_target as _wandb_target
 import utils
 
 
@@ -564,8 +565,11 @@ def finetune(model: pl.LightningModule, config: TrainingContext, conf_descriptio
             wandb_config = dict(model_config.get_flat_dict())
             wandb_config['num_levels'] = num_levels
             wandb_config['num_levels_per_step'] = getattr(config, 'num_levels_per_step', None) or num_levels
+            project, group = _wandb_target(config.wandb_project_name)  # MedNest_* -> one project
+            group_kwargs = dict(group=group, tags=[group]) if group else dict()
             logger = WandbLogger(
-                project=config.wandb_project_name,
+                project=project,
+                **group_kwargs,
                 name=f"{conf_description}_das6",
                 config=wandb_config,
                 save_dir=paths.LOG_PATH,

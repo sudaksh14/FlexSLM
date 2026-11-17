@@ -255,13 +255,24 @@ FRACTIONS_025 = (0.25, 0.5, 0.75, 1.0)
 # The final Stage-1 recipe: overrides of make_stage1's defaults, filled in once the pilots are
 # analysed. Every final-budget run (full, no_order, w025, the independent baselines) uses it,
 # so they cannot drift apart.
-FINAL_S1 = dict()  # never put `ordering` here: that is importance_order.FINAL_ORDERING
+# FINAL (user, 2026-11-16; pilots in implementation_log.md, 2026-11-12 and 2026-11-16):
+#   lr 2e-4            largest single gain on the narrow levels (L0 17.2 -> 14.6)
+#   CE only            KD from the off-the-shelf 1.7B hurts (17.2/11.2/7.49 vs 15.5/10.4/6.97 without);
+#                      the corrected teacher is within 1-2% of CE only: no teacher at all
+#   9-width grid, anchors 0.5 / 0.75 / 1.0 every step + 1 random width: nine monotone sizes, anchors unchanged
+#   unchanged defaults: clip 1.0 (unclipped is worse in Stage 1), equal level weights, 1% warm-up + cosine,
+#   32 x 1,024 tokens per step, seed 0.
+FINAL_S1 = dict(lr=2e-4, kd_lambda=0.0, fractions=FRACTIONS_9, anchor_levels=(0, 4, 8), num_levels_per_step=4)
+FINAL_ANCHORS = (0, 4, 8)  # level indices of the widths 0.5 / 0.75 / 1.0 in the final 9-width grid
 # S1 (scaling): Qwen3-1.7B backbone, levels 0.5 / 0.75 / 1.0 (hidden 1024 / 1536 / 2048), on hipster
 # (performance partition, 4 x RTX 6000 Ada 48 GB). The KD teacher must be larger than 1.7B: the existing
 # medical fine-tune II-Medical-8B (Qwen3-8B, same tokenizer; user decision 2026-11-13). The 8B bf16
 # teacher (16.4 GB) next to the student's fp32 weights + grads (13.8 GB) needs ZeRO-1 for the Adam state.
 II_MEDICAL_8B = "Intelligent-Internet/II-Medical-8B"
-S1_1P7B = dict(preset="qwen3-1.7b-gqa", teacher_hf_model=II_MEDICAL_8B, zero_optimizer=True, micro_batch_size=2)
+# 2026-11-16 (user): no teacher for the 1.7B backbone, CE only (II-Medical-8B scores 7.46 on PMC, barely
+# better than the untrained 1.7B student at 7.92, and does not answer in the boxed format). Without the
+# 8B teacher the run fits 2 x A40 on DAS-6 node205 with plain AdamW (no ZeRO-1).
+S1_1P7B = dict(preset="qwen3-1.7b-gqa", micro_batch_size=2)
 
 
 def make_stage1(train_tokens: int, wandb_project_name: str, ordering: str = "none",
@@ -274,10 +285,7 @@ def make_stage1(train_tokens: int, wandb_project_name: str, ordering: str = "non
     from config.experiments import make_flexllama_warmstart_kd
     from training.importance_order import start_weights
     model_config = make_flexllama_warmstart_kd(preset, fractions=tuple(fractions)).model_config
-    if preset != "qwen3-0.6b" and ordering != "none":
-        raise NotImplementedError(f"ordering {ordering!r} for {preset}: build its ordered checkpoint first "
-                                  "(training/importance_order.py --model ...) and add it to ORDERED_CHECKPOINTS")
-    hf_start = start_weights(ordering) if preset == "qwen3-0.6b" else model_config.pretrained_hf_model
+    hf_start = start_weights(ordering, hf_model=model_config.pretrained_hf_model, preset=preset)
     model_config = dataclasses.replace(model_config, pretrained_hf_model=hf_start,
                                        level_norms=level_norms, modulation=modulation)
     kwargs = dict(train_tokens=train_tokens, gradient_clip_val=1.0, seed=0,
@@ -299,22 +307,29 @@ def register_stage1_configs(configs: dict) -> None:
     flex[CORRECTED_TEACHER_CONFIG] = make_stage1(
         S1_PILOT_TOKENS, "MedNest_s1_teacher_correction", preset="qwen3-1.7b-gqa", fractions=(1.0,),
         kd_lambda=0.0, lr=2e-5, gradient_clip_val=None)
-    flex["s1.qwen3_0p6b.full.w025"] = make_stage1(S1_FULL_TOKENS, "MedNest_s1_full_w025",
-                                                  ordering=FINAL_ORDERING, fractions=FRACTIONS_025, **FINAL_S1)
+    # The final recipe at the pilot budget: comparable with the pilot table, and the gate for the 100M run.
+    flex["s1.qwen3_0p6b.pilot.final"] = make_stage1(S1_PILOT_TOKENS, "MedNest_s1_pilot_final",
+                                                    ordering=FINAL_ORDERING, **FINAL_S1)
+    flex["s1.qwen3_0p6b.full.w025"] = make_stage1(
+        S1_FULL_TOKENS, "MedNest_s1_full_w025", ordering=FINAL_ORDERING,
+        **dict(FINAL_S1, fractions=FRACTIONS_025, anchor_levels=None, num_levels_per_step=None))
     flex["s1.qwen3_0p6b.full"] = make_stage1(S1_FULL_TOKENS, "MedNest_s1_full", ordering=FINAL_ORDERING, **FINAL_S1)
     # I1: independent baselines of the L0 (0.19B) and L1 (0.36B) shapes, the same ordered
     # prefix as the nested level, trained alone with the same Stage-1 budget and recipe.
+    # indep_l0 / indep_l1 = the 0.5 and 0.75 widths, i.e. grid levels FINAL_ANCHORS[0] and [1].
     for lvl in (0, 1):
         flex[f"s1.qwen3_0p6b.full.indep_l{lvl}"] = make_stage1(
             S1_FULL_TOKENS, f"MedNest_s1_indep_l{lvl}", ordering=FINAL_ORDERING,
-            **dict(FINAL_S1, train_levels=(lvl,)))
+            **dict(FINAL_S1, train_levels=(FINAL_ANCHORS[lvl],)))
     # A1: the final recipe without importance ordering (Stage 2: ...nested.no_order). Only
     # meaningful if the pilots choose an ordering; if FINAL_ORDERING stays "none", A1 is
     # reported from the order_* pilots instead and this config is not run.
     flex["s1.qwen3_0p6b.full.no_order"] = make_stage1(S1_FULL_TOKENS, "MedNest_s1_full_no_order",
                                                       **dict(FINAL_S1, ordering="none"))
     flex["s1.dev.qwen3_0p6b_smoke"] = make_stage1(2_000_000, "MedNest_s1_dev")
-    # S1 on Qwen3-1.7B: original weight order until a 1.7B ordered checkpoint exists (make_stage1 refuses
-    # anything else); the 0.6B recipe (FINAL_S1) otherwise.
-    flex["s1.qwen3_1p7b.full"] = make_stage1(S1_FULL_TOKENS, "MedNest_s1_1p7b_full", **dict(FINAL_S1, **S1_1P7B))
-    flex["s1.dev.qwen3_1p7b_smoke"] = make_stage1(2_000_000, "MedNest_s1_1p7b_dev", **S1_1P7B)
+    # S1 on Qwen3-1.7B: the 0.6B recipe (FINAL_S1 + FINAL_ORDERING) on the 1.7B backbone; needs
+    # hf_export/qwen3-1.7b.minitron (importance_order.sbatch --model Qwen/Qwen3-1.7B ...).
+    flex["s1.qwen3_1p7b.full"] = make_stage1(S1_FULL_TOKENS, "MedNest_s1_1p7b_full", ordering=FINAL_ORDERING,
+                                             **dict(FINAL_S1, **S1_1P7B))
+    flex["s1.dev.qwen3_1p7b_smoke"] = make_stage1(2_000_000, "MedNest_s1_1p7b_dev", ordering=FINAL_ORDERING,
+                                                  **dict(FINAL_S1, **S1_1P7B))

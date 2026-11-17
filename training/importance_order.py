@@ -63,16 +63,30 @@ ORDERED_CHECKPOINTS = {"taylor": os.path.join("hf_export", "qwen3-0.6b.taylor"),
                        "hidden_act": os.path.join("hf_export", "qwen3-0.6b.hidden_act"),
                        "minitron": os.path.join("hf_export", "qwen3-0.6b.minitron")}
 ORDERED_QWEN3_0P6B = ORDERED_CHECKPOINTS["taylor"]
+# Ordered checkpoints per model preset (other presets: build with --model ... --out ... first).
+ORDERED_BY_PRESET = {
+    "qwen3-0.6b": ORDERED_CHECKPOINTS,
+    "qwen3-1.7b-gqa": {"minitron": os.path.join("hf_export", "qwen3-1.7b.minitron")},
+}
 # Ordering of the final recipe (s1.qwen3_0p6b.full and the Stage-2 runs that need a start
-# checkpoint). Provisional: set from the pilots s1.qwen3_0p6b.pilot.{base,order_*}.
-FINAL_ORDERING = "none"
+# checkpoint). Final (user, 2026-11-16): Minitron activation ordering. After 20M tokens of
+# Stage 1 at lr 2e-4 it gives PMC val ppl 13.5 / 9.73 / 7.63 (Taylor 14.1 / 9.94 / 7.71,
+# original order 14.6 / 10.4 / 7.66) and it is the cheapest to compute (44 s vs 100 s).
+FINAL_ORDERING = "minitron"
 
 
-def start_weights(ordering: str, hf_model: str = "Qwen/Qwen3-0.6B") -> str:
-    """Warm-start checkpoint for an ordering scheme of Qwen3-0.6B."""
+def start_weights(ordering: str, hf_model: str = "Qwen/Qwen3-0.6B", preset: str = "qwen3-0.6b") -> str:
+    """Warm-start checkpoint for an ordering scheme: hf_model itself for "none", else the
+    ordered checkpoint of `preset`."""
     if ordering not in ORDERINGS:
         raise ValueError(f"ordering must be one of {ORDERINGS}, got {ordering!r}")
-    return hf_model if ordering == "none" else ORDERED_CHECKPOINTS[ordering]
+    if ordering == "none":
+        return hf_model
+    ordered = ORDERED_BY_PRESET.get(preset, {})
+    if ordering not in ordered:
+        raise NotImplementedError(f"ordering {ordering!r} for {preset}: build its ordered checkpoint first "
+                                  "(training/importance_order.py --model ... --out ...) and add it to ORDERED_BY_PRESET")
+    return ordered[ordering]
 
 
 def _layers(model):
