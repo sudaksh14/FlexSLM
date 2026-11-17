@@ -974,3 +974,41 @@ max_seq 3072):
   recovery + distillation (MedNest 596M 29.8 vs conventional FT 23.1). Estimate: Stage 1 ~6-8 h (indep_l0/l1 took 4.2 / 5.0 h
   on node206), Stage 2 ~3-4 h, eval 3 min -> result ~20 h from now (node206 frees at ~03:30 on 11-18). Test added (84 pass).
   Paper: Table `tab:main` row "Independent (596M)" (\tbd), baseline (iii) text covers the full width.
+- **Jetson scripts prepared (user, 2026-11-17)** in `jetson/` (README there):
+  * `mednest_jetson/elastic.py`: every width = standard HF Qwen3 whose parameters are prefix **views** of the
+    full-width export (zero copy; 9 widths cost one model's memory; switch = pick a view); same attention kernel
+    as the loaded model; `materialize` mode (contiguous copy on switch) as fallback if strided matmuls are slow;
+    `check_views` vs the exported dense levels. `measure.py`: MemPoller (MemTotal-MemAvailable, unified
+    memory), page-cache drop, `load_width_from_full` (read one width's prefix slices from the single full
+    checkpoint = memory-elastic deployment). `workload.py`: 210-question stratified subset
+    (`jetson/questions/subset.jsonl`, 30 per benchmark, seed 0, with test_index; `data/` is gitignored, hence
+    `questions/`), prompts/scoring from eval/eval_gen.py, timed greedy decoder (TTFT / decode ms per token).
+  * Scripts: `check_env.py` (stack, rails, sudo, views == exported levels ON the board), `bench_widths.py`
+    (per width + dense baselines: latency, memory, energy net of idle, subset accuracy), `bench_switch.py`
+    (view / materialize / reload warm+cold / slice-load / all-resident memory), `bench_trace.py` (urgent/routine
+    stream while nvpmodel goes 15W->7W->15W; policies fixed:max, fixed:min, elastic, reload; deadlines `auto`
+    from the measured profiles), `aggregate.py` (CSV/LaTeX, on-device vs cluster per-question agreement),
+    `run_all.sh` (QUICK=1 smoke ~10 min; full ~2 h estimate), `stage_models.sh` (DAS-6 rsync + Hub models pinned:
+    Qwen3-0.6B c1899de, Apollo-0.5B 1a57c38, Apollo2-0.5B 044ffc6, Apollo-2B 4049fc0, Apollo2-2B ee3b5f0,
+    Apollo-1.8B 73072ac local snapshot), `requirements-jetson.txt` (transformers 4.51.1 as on the cluster; board
+    torch 2.8.0 NVIDIA wheel via venv --system-site-packages).
+  * `jetson/nestbench/{device,power,timing,results}.py` vendored UNCHANGED (md5 in its __init__) from
+    Matryoshka Learning/jetson_eval_harness; its telemetry test copied as test/test_jetson_device_telemetry.py.
+    New CPU tests test/test_jetson_elastic.py (views == dense prefix slices, bit-exact at full width; share
+    storage; materialize; slice-load; timed greedy == generate; subset). 29 pass.
+  * DAS-6 dry run of the whole chain on the pilot export: `scripts/das6/jetson_validate.sbatch` -> **28335** (node207).
+- **Jetson scripts validated end to end on a cluster GPU (A10, node207; 28340, pilot export, 3 widths, no rails):**
+  check_env all required checks pass (view == exported level: max|dlogit| 0, argmax 100%; graph decode == static
+  cache 100%; static vs eager differs only at bf16 near-ties, max logit gap 0.000 <= 0.25). Earlier runs 28335-28339
+  found and fixed: MemPoller `_stop` name clash with Thread internals; eager decoding is launch-bound at batch 1
+  (every width ~32 ms/token on the A10) so the benchmarks decode with a **static KV cache + CUDA-graph steps**
+  (`mednest_jetson/decode.py`; 4.8 / 6.0 / 7.2 ms/token for the 3 widths; widths share one full-width KV buffer per
+  length bucket 512/1024/2048/4096, because one cache sized for the longest prompt slowed short requests by 25%).
+  On-device vs cluster per-question agreement 95-100% (differences = bf16 ties). Switch: view 0.012 ms, materialize
+  165 ms, separate model load 0.25-0.40 s (warm), slice load 0.32-0.43 s; resident weights 1.19 GB elastic vs 2.30 GB
+  for 3 separate models. Trace (deadlines auto) behaves as designed: elastic 20.8% missed vs fixed:max 37.5%,
+  reload 66.7%.
+  **Known artifact, to fix before the board runs:** in bench_trace the first use of a (width, cache bucket) pays view
+  construction and CUDA-graph capture (~100-230 ms) inside that request's latency (visible as "switch_ms" of
+  fixed policies); warm every (width, bucket) before the measured stream. Not fixed yet (user asked to commit once
+  validation passed). Energy/power/thermal paths are untested until the board (rails absent here: recorded as None).

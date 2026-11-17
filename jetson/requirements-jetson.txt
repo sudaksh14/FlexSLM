@@ -1,0 +1,16 @@
+# MedNest on the Jetson Orin Nano (JetPack 6.2.1, Python 3.10, CUDA 12.6).
+# torch is NOT listed: use the board's NVIDIA JetPack wheel (torch 2.8.0 is installed and verified on
+# this board, jetson_logs/exp01_env.jsonl); `pip install torch` gives a CPU-only aarch64 build.
+# Install into a venv that sees the system torch:
+#   python3 -m venv --system-site-packages ~/mednest-venv && . ~/mednest-venv/bin/activate
+#   pip install -r jetson/requirements-jetson.txt
+# Pins = the cluster evaluation's versions (DAS-6 overlay), so on-device answers come from the same code.
+transformers==4.51.1
+tokenizers==0.21.1
+safetensors>=0.4.3
+huggingface_hub>=0.30,<1.0
+numpy<2
+# Apollo-1.8B only (Qwen-1 model code):
+tiktoken
+einops
+transformers_stream_generator==0.0.5
