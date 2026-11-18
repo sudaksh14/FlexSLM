@@ -1166,3 +1166,27 @@ max_seq 3072):
   runs (47 finished, 3 failed = the crashed copies, 2 running: A2 28274 and the full-width Stage 2 28332), grouped by the old
   per-config name (group + tag). New runs go to `MedNest` directly (config/wandb.py). The jobs' local wandb run directories under
   `/var/scratch/skalra/flexslm/store/wandb/job_*` also still exist. `scripts/wandb_inventory.py` = read-only inventory.
+
+### 2026-11-18 (late): status check, hipster fix, maintenance, commit
+- **DAS-6 (~21:00):** 28347 (Stage 2 of the 20M final-recipe pilot) at step 903/1044, still running on node205 (export 28348 and
+  evals 28349-57 follow); 28361 unit tests 51 passed, smokes 28362 / 28363 (kdadd0p1.corr, hydra) passed; **28365 (Hydra
+  lambda 0.1 Stage 1) running on node206 (3.7 h)**; 28364 (node205), 28366 / 28367 (node206) wait for those nodes (no job has
+  failed). node207: 28396 (1.7B reasoning curve) running, 3.8 h, 768/2098 questions. Nothing new has finished that gives a result.
+- **Hipster (397255-397288):** migrate_to_home 397255 COMPLETED (3 min), fetch of the 3 exports from DAS-6 397256 COMPLETED
+  (hf_export has the E_A teacher, qwen3-0.6b.minitron, qwen3-1.7b.minitron; home now 129 GB / 200 GB). **397257 (unit tests)
+  FAILED: `my_env` has no pytest** (never install into my_env); the two smoke jobs then sat on DependencyNeverSatisfied.
+  Fix: `scontrol update JobId=397258/397259 Dependency=` (smokes now pending on Priority, whole chain intact) and
+  tests rerun as **397369** with pytest pip-installed into `~/flexslm_saves/pytest_overlay` (scripts/hipster/pytest.sbatch).
+  The new Stage-2-only ablation test (test_stage2_only_ablations_change_one_thing_each) has NOT run anywhere yet (DAS-6 GPU
+  nodes are all busy, pytest.sbatch pins node207; the hipster smokes also resolve the single / 1.7B configs).
+- **Bug found:** `sbatch --export=ALL,...,BUDGETS=64,128,...` splits at the commas, so 28395/28396 got BUDGETS=64 only (the smoke
+  showed only "budget 64"). Samples files still hold every full generation + gen_tokens, so **28396's curve is rescored
+  offline: `python -m eval.rescore_budgets results/gen.Qwen-Qwen3-1.7B.t4096.pthink.n300.sq3 --budgets 64,...,4096
+  --tokenizer Qwen/Qwen3-1.7B --per_source 300`** (new eval/rescore_budgets.py; needs transformers, run as a job).
+  28397 cancelled and resubmitted as **28405** with `env BUDGETS=... sbatch` (queue_2026-11-18.sh fixed the same way).
+- **Maintenance 2026-11-19 ~13:00 (no reservation shown by scontrol on either cluster):** jobs running during a shutdown are
+  killed; Slurm requeues batch jobs (JobRequeue=1 on both; same as 2026-11-12, when B1 28150 / noclip 28155 were requeued) and
+  training resumes from `last.ckpt` (saved every 5% of an epoch, i.e. ~13 min of a 4.3 h Stage 2; resume=True by default).
+  Pending jobs and their dependency chains survive. DAS-6 (ReturnToService=1): after an unexpected reboot the nodes stayed DOWN
+  until an admin resumed them (2026-11-12 -> 11-13); hipster has ReturnToService=2 (nodes return by themselves).
+  Evals / exports / continuum jobs restart from scratch (short). Stage-1 runs resume the same way.

@@ -36,6 +36,7 @@ import torch.nn.functional as F
 
 from training import FlexLMTrainer, FlexLMKDTrainer
 from training.level_weights import LevelWeightingMixin
+from training.trainer import kd_mix
 
 DEFAULT_LOSS_CHUNK_SIZE = 1024
 
@@ -170,6 +171,7 @@ class MemOptFlexLMKDTrainer(_MemOptMixin, LevelWeightingMixin, FlexLMKDTrainer):
         input_ids, _ = batch
 
         kd_lambda = self.training_context.kd_lambda
+        kd_form = getattr(self.training_context, "kd_form", "convex")  # contexts saved before 2026-11-18
         T = self.training_context.kd_temperature
         vocab_size = self.submodel.config.vocab_size
         chunk = self._chunk_size()
@@ -222,7 +224,7 @@ class MemOptFlexLMKDTrainer(_MemOptMixin, LevelWeightingMixin, FlexLMKDTrainer):
                             reduction="sum",
                         ) / n_total * (T ** 2)
                     if training:
-                        chunk_loss = (1 - kd_lambda) * ce_chunk + kd_lambda * kl_chunk
+                        chunk_loss = kd_mix(ce_chunk, kl_chunk, kd_lambda, kd_form)
                         (chunk_loss * w if w != 1.0 else chunk_loss).backward()
                     ce_loss[i] = ce_loss[i] + ce_chunk.detach()
                     kl_loss[i] = kl_loss[i] + kl_chunk.detach()
@@ -233,7 +235,7 @@ class MemOptFlexLMKDTrainer(_MemOptMixin, LevelWeightingMixin, FlexLMKDTrainer):
 
         total_loss = 0.0
         for i in levels:
-            loss = (1 - kd_lambda) * ce_loss[i] + kd_lambda * kl_loss[i]
+            loss = kd_mix(ce_loss[i], kl_loss[i], kd_lambda, kd_form)
             self.log(f"{stage}_level{i}_loss", loss, prog_bar=False, sync_dist=True)
             self.log(f"{stage}_level{i}_ce_loss", ce_loss[i], prog_bar=False, sync_dist=True)
             self.log(f"{stage}_level{i}_kl_loss", kl_loss[i], prog_bar=False, sync_dist=True)

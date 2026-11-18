@@ -195,11 +195,29 @@ class FlexModelTrainer(pl.LightningModule, BaseTrainer):
 
 
 LEVEL_SAMPLING = ("sandwich", "single")
+# How CE and the KD term are combined (kd_mix). convex: (1 - lambda) CE + lambda KL, the MedNest /
+# Minitron form (every run before 2026-11-18). additive: CE + lambda KL, HydraLLM's form
+# (train_llm/trainer_hydravit.py), user decision 2026-11-18 for the Stage-1 KD-weight sweep.
+KD_FORMS = ("convex", "additive")
 
 
 def check_level_sampling(level_sampling: str) -> None:
     if level_sampling not in LEVEL_SAMPLING:
         raise ValueError(f"level_sampling must be one of {LEVEL_SAMPLING}, got {level_sampling!r}")
+
+
+def check_kd_form(kd_form: str) -> None:
+    if kd_form not in KD_FORMS:
+        raise ValueError(f"kd_form must be one of {KD_FORMS}, got {kd_form!r}")
+
+
+def kd_mix(ce, kl, kd_lambda: float, kd_form: str = "convex"):
+    """The training loss from the CE and KL terms (see KD_FORMS)."""
+    if kd_form == "convex":
+        return (1 - kd_lambda) * ce + kd_lambda * kl
+    if kd_form == "additive":
+        return ce + kd_lambda * kl
+    raise ValueError(f"kd_form must be one of {KD_FORMS}, got {kd_form!r}")
 
 
 def adamw(params, lr: float, weight_decay: float, model=None, continuum_lr: float = None,
@@ -277,8 +295,16 @@ class FlexLMTrainer(FlexModelTrainer):
         if stage == "train" and getattr(self.training_context, "level_sampling", "sandwich") == "single":
             # One level per step, uniformly (MatFormer). Seeded by (seed, step), so
             # every DDP rank draws the same level and a resumed run replays it.
+            # level_sampling_weights: relative probabilities, e.g. HydraLLM's 1/1/1/3 (the full
+            # width 3x as often as each other width); None = uniform (MatFormer).
             seed = getattr(self.training_context, "seed", 0)
-            return [random.Random(seed * 1_000_003 + self.global_step).choice(all_levels)]
+            rng = random.Random(seed * 1_000_003 + self.global_step)
+            weights = getattr(self.training_context, "level_sampling_weights", None)
+            if weights is None:
+                return [rng.choice(all_levels)]
+            if len(weights) != len(all_levels):
+                raise ValueError(f"level_sampling_weights has {len(weights)} entries for {len(all_levels)} levels")
+            return rng.choices(all_levels, weights=weights, k=1)
         num_sample = getattr(self.training_context, "num_levels_per_step", None)
         if stage != "train" or num_sample is None or num_sample >= len(all_levels):
             return all_levels
@@ -399,7 +425,7 @@ class FlexLMKDTrainer(FlexLMTrainer):
                 reduction="batchmean",
             ) * (T ** 2)
 
-            loss = (1 - kd_lambda) * ce_loss + kd_lambda * kl_loss
+            loss = kd_mix(ce_loss, kl_loss, kd_lambda, getattr(self.training_context, "kd_form", "convex"))
             ppl  = torch.exp(ce_loss.detach())
 
             self.log(f"{stage}_level{i}_loss",    loss,    prog_bar=False, sync_dist=True)
@@ -487,7 +513,8 @@ def _print_experiment_banner(conf_description, model_config, config, steps_per_e
     if pretrained:
         lines.append(f"  Warm start: {pretrained}")
     if teacher:
-        lines.append(f"  KD teacher: {teacher}  (kd_lambda={kd_lambda}, kd_temperature={getattr(config, 'kd_temperature', '?')})")
+        lines.append(f"  KD teacher: {teacher}  (kd_lambda={kd_lambda}, kd_temperature={getattr(config, 'kd_temperature', '?')}, "
+                     f"kd_form={getattr(config, 'kd_form', 'convex')})")
     lines.append(
         f"  Data:     pipeline={pipeline}  tokenizer={loader_kwargs.get('tokenizer_name', '?')}"
         f"  batch_size={batch_size}  max_seq_length={max_seq_length}"

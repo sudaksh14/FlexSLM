@@ -28,6 +28,7 @@ import config.paths as paths
 import utils
 from training import FlexLMKDTrainer, FlexTrainingContext, TrainerBuilder
 from training.importance_order import FINAL_ORDERING, start_weights
+from training.stage1 import S1_KD_PILOTS
 from training.trainer import adamw, check_level_sampling, warmup_cosine_scheduler
 from training.level_weights import LevelWeightingMixin, check_args as check_level_weighting
 
@@ -143,6 +144,31 @@ SFT_RUNS = [
     ("sft.paper.qwen3_0p6b_nested.no_stage1", None, dict(_S2,
         hf_preset="qwen3-0.6b", level_fractions=(0.5, 0.75, 1.0), hf_start=start_weights(FINAL_ORDERING),
         wandb_project_name="MedNest_s2_no_stage1")),
+    # 2026-11-18 (user): the paper's method is A2 above (ordering + nested SFT with KD, NO Stage 1). Its
+    # ablations, independent baselines and the 1.7B backbone, each = A2 with one change (run on hipster):
+    *[(f"sft.paper.qwen3_0p6b_nested.no_stage1.{tag}", None, dict(_S2,
+        hf_preset="qwen3-0.6b", level_fractions=(0.5, 0.75, 1.0), hf_start=start_weights(FINAL_ORDERING),
+        # hipster capacity (2 x L4 24 GB): micro-batch 4 instead of 8, the same 16 per GPU x 2 = 32 per step
+        # (micro-batches split a step exactly, so the update is A2's).
+        **{"micro_batch_size": 4, **change, "wandb_project_name": f"MedNest_s2only_{tag}"}))
+      for tag, change in (
+          ("no_kd", dict(kd_lambda=0.0)),                                   # CE on the answers only
+          ("no_order", dict(hf_start=start_weights("none"))),               # original Qwen3-0.6B order
+          ("single", dict(level_sampling="single")),                        # one uniformly random width per step
+          ("indep_l0", dict(train_levels=[0])),                             # 188M slice fine-tuned alone
+          ("indep_l1", dict(train_levels=[1])),                             # 364M slice fine-tuned alone
+          ("indep_l2", dict(train_levels=[2])),                             # full width alone, WITH KD
+      )],
+    # MedNest on Qwen3-1.7B (levels 0.5 / 0.75 / 1.0, Minitron-ordered), CE only: no larger teacher with
+    # Qwen3's tokenizer that answers in the boxed format (user decision 2026-11-16, kept 2026-11-18).
+    ("sft.paper.qwen3_1p7b_nested.no_stage1", None, dict(_S2,
+        hf_preset="qwen3-1.7b-gqa", level_fractions=(0.5, 0.75, 1.0),
+        hf_start=start_weights(FINAL_ORDERING, hf_model="Qwen/Qwen3-1.7B", preset="qwen3-1.7b-gqa"),
+        kd_lambda=0.0, tokenizer_name="Qwen/Qwen3-1.7B",
+        # hipster capacity (4 x L4 24 GB): 8 per GPU x 4 = 32 per step, micro-batch 2, ZeRO-1 (Adam state
+        # sharded over the 4 ranks) and activation checkpointing to fit 1.7B fp32 weights + grads in 24 GB.
+        batch_size=8, micro_batch_size=2, zero_optimizer=True, activation_checkpointing=True,
+        wandb_project_name="MedNest_s2only_1p7b")),
     # A1: no importance ordering (Stage 1 and Stage 2 both without it).
     ("sft.paper.qwen3_0p6b_nested.no_order", "s1.qwen3_0p6b.full.no_order", dict(_S2,
         wandb_project_name="MedNest_s2_no_order")),
@@ -162,16 +188,23 @@ SFT_RUNS = [
         train_levels=[8], batch_size=32, wandb_project_name="MedNest_i1_indep_full")),
     # Early signal (2026-11-16): Stage 2 on the best 20M Stage-1 pilot (Minitron ordering, lr 2e-4,
     # three levels), with and without KD from the fine-tuned 1.7B.
+    ("sft.pilot.qwen3_0p6b_nested", "s1.qwen3_0p6b.pilot.order_minitron_lr2e-4", dict(_S2,
+        wandb_project_name="MedNest_s2_pilot")),
     # 2026-11-18 (user): the final recipe at the PILOT budget, to find out why the 100M-token final model
     # (M3: full width 27.2) is worse than the 20M-token pilot (29.8): Stage 2 (KD, 9-width grid, anchors + 1
     # random width, exactly M3's Stage 2) from s1.qwen3_0p6b.pilot.final (20M tokens, CE-only, 9 widths).
     # If it matches the pilot, the Stage-1 budget is the cause; if it matches M3, the Stage-1 loss/widths are.
     ("sft.pilot.qwen3_0p6b_final9", "s1.qwen3_0p6b.pilot.final", dict(_S2,
         wandb_project_name="MedNest_s2_pilot_final9")),
-    ("sft.pilot.qwen3_0p6b_nested", "s1.qwen3_0p6b.pilot.order_minitron_lr2e-4", dict(_S2,
-        wandb_project_name="MedNest_s2_pilot")),
     ("sft.pilot.qwen3_0p6b_nested.no_kd", "s1.qwen3_0p6b.pilot.order_minitron_lr2e-4", dict(_S2,
         kd_lambda=0.0, wandb_project_name="MedNest_s2_pilot_no_kd")),
+    # 2026-11-18 (user): Stage 2 of the Stage-1 KD-weight sweep / teacher ablation / HydraLLM-sampling pilots
+    # (stage1.S1_KD_PILOTS), exactly the Stage 2 above (= M3's), so the pilots differ in Stage 1 only.
+    # ".1gpu": the same run on ONE GPU (node206): 32 sequences per GPU = the same effective batch 32 and steps.
+    *[(f"sft.pilot.qwen3_0p6b_final9{s1[len('s1.qwen3_0p6b.pilot.final'):]}{gpu}", s1, dict(_S2,
+        **(dict(batch_size=32) if gpu else {}),
+        wandb_project_name="MedNest_s2_pilot_final9" + s1[len("s1.qwen3_0p6b.pilot.final"):].replace(".", "_")))
+      for s1 in S1_KD_PILOTS for gpu in ("", ".1gpu")],
     # S1 Stage 2 (DAS-6 node205, 2 x A40): nested SFT of Qwen3-1.7B from s1.qwen3_1p7b.full, CE only
     # (user, 2026-11-16: no teacher for the 1.7B backbone), the paper schedule (16 per GPU x 2 = 32).
     ("sft.paper.qwen3_1p7b_nested", "s1.qwen3_1p7b.full", dict(_S2,

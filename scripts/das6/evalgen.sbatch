@@ -18,7 +18,12 @@ MAX_NEW=${2:-32}
 BS=${3:-32}
 SRC=${4:-}
 PF=${PROMPT_FORMAT:-as_is}
+# Optional (environment): BUDGETS=64,128,... scores every smaller decoding budget from the same greedy
+# generation; PER_SOURCE=N keeps the first N questions of each test set (deterministic subset);
+# SAMPLE=qwen3 samples with Qwen3's thinking-mode settings (T 0.6, top-p 0.95, top-k 20, seed 0).
 source scripts/das6/common.sh gpu
 PFTAG=""; [[ "$PF" != as_is ]] && PFTAG=".p$PF"
-OUT="results/gen.$(echo "$MODEL" | tr '/' '-').t$MAX_NEW$PFTAG${SRC:+.$(echo "$SRC" | tr '/,' '-+')}.json"
-python -m eval.eval_gen "$MODEL" --out "$OUT" --max_new_tokens "$MAX_NEW" --batch_size "$BS"   --prompt_format "$PF" ${SRC:+--sources "$SRC"} ${REVISION:+--revision "$REVISION"}   ${TRUST_REMOTE_CODE:+--trust_remote_code}
+NTAG=""; [[ -n "${PER_SOURCE:-}" ]] && NTAG=".n$PER_SOURCE"
+SAMPLING=""; [[ "${SAMPLE:-}" == qwen3 ]] && { SAMPLING="--temperature 0.6 --top_p 0.95 --top_k 20 --seed 0"; NTAG="$NTAG.sq3"; }
+OUT="results/gen.$(echo "$MODEL" | tr '/' '-').t$MAX_NEW$PFTAG$NTAG${SRC:+.$(echo "$SRC" | tr '/,' '-+')}.json"
+python -m eval.eval_gen "$MODEL" --out "$OUT" --max_new_tokens "$MAX_NEW" --batch_size "$BS"   --prompt_format "$PF" ${SRC:+--sources "$SRC"} ${REVISION:+--revision "$REVISION"}   ${TRUST_REMOTE_CODE:+--trust_remote_code} ${BUDGETS:+--budgets "$BUDGETS"}   ${PER_SOURCE:+--per_source "$PER_SOURCE"} $SAMPLING

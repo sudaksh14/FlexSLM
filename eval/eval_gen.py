@@ -7,7 +7,13 @@ rule (rewards/medmix_reward.py), re-implemented here:
     which must equal the gold letter;
   - MedCalc-Bench: decimals must fall inside the gold [lower, upper] limits,
     integers must match after rounding, dates and (weeks, days) must match exactly.
-Prompts are rendered with thinking disabled (no search, no reasoning trace).
+Prompts are rendered with thinking disabled (no search, no reasoning trace), except --prompt_format think:
+the same Qwen3 prompt with thinking ENABLED (the empty <think></think> block removed, so the model reasons
+first), FaithMed's reasoning mode without retrieval.
+--budgets 64,128,...: score the answer the model would have given with each smaller max_new_tokens.
+Greedy decoding is prefix-consistent, so the first b generated tokens of the --max_new_tokens run ARE the
+max_new_tokens=b run; one generation gives the whole accuracy-vs-decoding-budget curve. Every sample also
+records its generated token count (to the end-of-sequence token), for the inference-compute comparison.
 Other model families (--prompt_format): the user message is taken out of the stored Qwen3
 prompt (same instruction and question) and rendered in the model's own format, e.g. Apollo's
 "User:{query}\nAssistant:" (FreedomIntelligence model cards) or the tokenizer's chat template.
@@ -62,7 +68,8 @@ def score_medcalc(gen: str, row: dict) -> bool:
 
 
 QWEN3_USER = re.compile(r"<\|im_start\|>user\n(.*?)<\|im_end\|>", re.DOTALL)
-PROMPT_FORMATS = ("as_is", "apollo", "chat", "apollo_answer")
+PROMPT_FORMATS = ("as_is", "apollo", "chat", "apollo_answer", "think")
+QWEN3_NO_THINK = "<|im_start|>assistant\n<think>\n\n</think>\n\n"
 # apollo_answer: Apollo's own evaluation style (arXiv 2403.03640, Sect. 4): the assistant turn is
 # pre-filled with "The correct answer is" and the answer is read from the first tokens. Our
 # instruction asks for step-by-step reasoning and a \boxed{} answer, which these models do not
@@ -82,6 +89,11 @@ def render_prompt(prompt: str, fmt: str, tokenizer=None) -> str:
     assistant turn pre-filled; chat: the tokenizer's own chat template."""
     if fmt == "as_is":
         return prompt
+    if fmt == "think":
+        # Qwen3's chat template with enable_thinking=True ends at "<|im_start|>assistant\n".
+        if not prompt.endswith(QWEN3_NO_THINK):
+            raise ValueError("think needs a stored Qwen3 prompt with thinking disabled")
+        return prompt[:-len(QWEN3_NO_THINK)] + "<|im_start|>assistant\n"
     m = QWEN3_USER.search(prompt)
     if m is None:
         raise ValueError("cannot find the user message in the stored prompt")
@@ -116,21 +128,40 @@ def is_correct(row: dict, gen: str) -> bool:
     return score_medcalc(gen, row) if row["source"] == MEDCALC else score_choice(gen, row["gt"])
 
 
+def stop_ids(model, tokenizer) -> set:
+    eos = model.generation_config.eos_token_id
+    eos = set(eos if isinstance(eos, (list, tuple)) else [eos] if eos is not None else [])
+    return eos | {tokenizer.pad_token_id, tokenizer.eos_token_id} - {None}
+
+
+def trim(ids: list, stops: set) -> list:
+    """Generated ids up to and including the first stop token (the rest is padding)."""
+    for k, t in enumerate(ids):
+        if t in stops:
+            return ids[:k + 1]
+    return ids
+
+
 @torch.no_grad()
-def generate(model, tokenizer, prompts, batch_size: int, max_new_tokens: int, add_special_tokens: bool = False):
+def generate(model, tokenizer, prompts, batch_size: int, max_new_tokens: int, add_special_tokens: bool = False,
+             return_ids: bool = False, sampling: dict = None):
     order = sorted(range(len(prompts)), key=lambda i: len(prompts[i]))
     out = [None] * len(prompts)
+    out_ids = [None] * len(prompts)
+    stops = stop_ids(model, tokenizer)
     for start in range(0, len(order), batch_size):
         idx = order[start:start + batch_size]
         enc = tokenizer([prompts[i] for i in idx], return_tensors="pt", padding=True,
                         add_special_tokens=add_special_tokens).to(model.device)
-        gen = model.generate(**enc, max_new_tokens=max_new_tokens, do_sample=False,
-                             pad_token_id=tokenizer.pad_token_id)
-        texts = tokenizer.batch_decode(gen[:, enc["input_ids"].shape[1]:], skip_special_tokens=True)
-        for i, t in zip(idx, texts):
+        decode = dict(do_sample=True, **sampling) if sampling else dict(do_sample=False)
+        gen = model.generate(**enc, max_new_tokens=max_new_tokens, pad_token_id=tokenizer.pad_token_id, **decode)
+        new = gen[:, enc["input_ids"].shape[1]:]
+        texts = tokenizer.batch_decode(new, skip_special_tokens=True)
+        for i, t, row in zip(idx, texts, new.tolist()):
             out[i] = t
+            out_ids[i] = trim(row, stops)
         print(f"  {min(start + batch_size, len(order))}/{len(order)}", flush=True)
-    return out
+    return (out, out_ids) if return_ids else out
 
 
 def main():
@@ -142,6 +173,16 @@ def main():
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--max_new_tokens", type=int, default=32)
     parser.add_argument("--prompt_format", default="as_is", choices=PROMPT_FORMATS)
+    parser.add_argument("--per_source", type=int, default=None,
+                        help="only the first N questions of each test set (file order; deterministic subset)")
+    # Qwen3 model card: thinking mode needs sampling (T 0.6, top-p 0.95, top-k 20); greedy decoding loops.
+    # A truncated sample is a sample with the smaller budget, so --budgets stays exact. Seeded.
+    parser.add_argument("--temperature", type=float, default=0.0, help="0 = greedy (default)")
+    parser.add_argument("--top_p", type=float, default=1.0)
+    parser.add_argument("--top_k", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--budgets", default=None,
+                        help="comma-separated decoding budgets <= max_new_tokens scored from the same generation")
     # Only for models whose architecture is not in transformers (Apollo-1.8B = Qwen-1 code); always
     # together with --revision pinned to a commit whose code was checked.
     parser.add_argument("--trust_remote_code", action="store_true")
@@ -164,21 +205,40 @@ def main():
     if args.sources:
         keep = set(args.sources.split(","))
         rows = [r for r in rows if r["source"] in keep]
+    if args.per_source:
+        seen = collections.Counter()
+        rows = [r for r in rows if (seen.update([r["source"]]) or seen[r["source"]] <= args.per_source)]
     prompts = [render_prompt(r["prompt"], args.prompt_format, tokenizer) for r in rows]
     if args.prompt_format != "as_is":
         print(f"[prompt {args.prompt_format}] {prompts[0]!r}")
     # The stored prompts and chat templates carry their own special tokens; the plain Apollo
     # format needs the model's BOS (Gemma-based Apollo models expect <bos>), added by the tokenizer.
-    gens = generate(model, tokenizer, prompts, args.batch_size, args.max_new_tokens,
-                    add_special_tokens=args.prompt_format.startswith("apollo"))
+    budgets = sorted({int(b) for b in args.budgets.split(",")}) if args.budgets else []
+    if any(b > args.max_new_tokens for b in budgets):
+        parser.error("every budget must be <= --max_new_tokens")
+    sampling = (dict(temperature=args.temperature, top_p=args.top_p, top_k=args.top_k)
+                if args.temperature > 0 else None)
+    torch.manual_seed(args.seed)
+    gens, gen_ids = generate(model, tokenizer, prompts, args.batch_size, args.max_new_tokens,
+                             add_special_tokens=args.prompt_format.startswith("apollo"), return_ids=True,
+                             sampling=sampling)
 
     per = collections.defaultdict(list)
+    per_budget = {b: collections.defaultdict(list) for b in budgets}
     samples = []
-    for r, g in zip(rows, gens):
+    for r, g, ids in zip(rows, gens, gen_ids):
         scored = (forced_answer(g, r) or "") if args.prompt_format == "apollo_answer" else g
         ok = is_correct(r, scored)
         per[r["source"]].append(ok)
-        samples.append({"source": r["source"], "gt": r["gt"], "boxed": last_boxed(scored), "correct": ok, "gen": g})
+        s = {"source": r["source"], "gt": r["gt"], "boxed": last_boxed(scored), "correct": ok,
+             "gen_tokens": len(ids), "prompt_tokens": len(tokenizer(prompts[len(samples)], add_special_tokens=False)["input_ids"]),
+             "gen": g}
+        for b in budgets:
+            prefix = g if len(ids) <= b else tokenizer.decode(ids[:b], skip_special_tokens=True)
+            ok_b = is_correct(r, (forced_answer(prefix, r) or "") if args.prompt_format == "apollo_answer" else prefix)
+            per_budget[b][r["source"]].append(ok_b)
+            s[f"correct@{b}"] = ok_b
+        samples.append(s)
 
     results = {}
     for src, oks in sorted(per.items()):
@@ -187,9 +247,21 @@ def main():
                         "no_boxed": sum(s["boxed"] is None for s in samples if s["source"] == src)}
         print(f"{src:28s} acc {100 * acc:5.1f} ± {100 * results[src]['stderr']:.1f}  "
               f"(n {len(oks)}, no \\boxed {results[src]['no_boxed']})")
+    for src in results:
+        toks = [s["gen_tokens"] for s in samples if s["source"] == src]
+        results[src]["mean_gen_tokens"] = sum(toks) / len(toks)
+        results[src]["mean_prompt_tokens"] = sum(s["prompt_tokens"] for s in samples if s["source"] == src) / len(toks)
+    by_budget = {}
+    for b in budgets:
+        by_budget[b] = {src: sum(oks) / len(oks) for src, oks in sorted(per_budget[b].items())}
+        by_budget[b]["avg"] = sum(by_budget[b].values()) / len(by_budget[b])
+        mean_tok = sum(min(s["gen_tokens"], b) for s in samples) / len(samples)
+        by_budget[b]["mean_gen_tokens"] = mean_tok
+        print(f"budget {b:5d}: avg acc {100 * by_budget[b]['avg']:5.1f}  mean generated tokens {mean_tok:7.1f}")
     with open(args.out, "w") as f:
-        json.dump({"model": args.model, "max_new_tokens": args.max_new_tokens,
-                   "prompt_format": args.prompt_format, "results": results}, f, indent=2)
+        json.dump({"model": args.model, "max_new_tokens": args.max_new_tokens, "prompt_format": args.prompt_format,
+                   "sampling": sampling, "seed": args.seed, "per_source": args.per_source,
+                   "results": results, "budgets": by_budget}, f, indent=2)
     with open(args.out.replace(".json", ".samples.jsonl"), "w") as f:
         for s in samples:
             f.write(json.dumps(s) + "\n")

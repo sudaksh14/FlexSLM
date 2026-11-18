@@ -40,7 +40,7 @@ from training import FlexTrainingContext, TrainerBuilder
 from training.level_weights import CONTEXT_DEFAULTS as _LW_DEFAULTS, check_args as check_level_weighting
 from training.importance_order import FINAL_ORDERING
 from training.memopt import MemOptFlexLMKDTrainer
-from training.trainer import adamw, check_level_sampling, warmup_cosine_scheduler
+from training.trainer import adamw, check_kd_form, check_level_sampling, warmup_cosine_scheduler
 
 PMC_DATA_DIR = os.path.join("data", "pmc_qwen3")
 S1_PILOT_TOKENS = 20_000_000  # 1/5 of the final budget
@@ -100,6 +100,8 @@ class Stage1Context(FlexTrainingContext):
     teacher_hf_model: str = "Qwen/Qwen3-1.7B"
     num_levels_per_step: int = None
     level_sampling: str = "sandwich"
+    level_sampling_weights: tuple = None
+    kd_form: str = "convex"
     lr: float = 1e-4
     weight_decay: float = 0.0
     warmup_ratio: float = 0.01
@@ -127,19 +129,24 @@ class Stage1Context(FlexTrainingContext):
                  micro_batch_size=4, level_weighting="none", level_weight_lr=1e-2, level_weight_ema=0.9,
                  level_weights_fixed=None, dwa_window=50, dwa_temperature=2.0,
                  anchor_levels=None, continuum_lr=1e-3, train_levels=None, zero_optimizer=False,
-                 epochs=1, patience=1000, **kwargs):
+                 level_sampling_weights=None, kd_form="convex", epochs=1, patience=1000, **kwargs):
         loader = functools.partial(load_pmc_memmap, data_dir=data_dir, max_seq_length=max_seq_length,
                                    global_batch_size=global_batch_size, train_tokens=train_tokens)
         FlexTrainingContext.__init__(self, loader, patience=patience, epochs=epochs, **kwargs)
         check_level_weighting(level_weighting, level_weight_lr, level_weight_ema,
                               level_weights_fixed, dwa_window, dwa_temperature)
         check_level_sampling(level_sampling)
+        check_kd_form(kd_form)
+        if level_sampling_weights is not None and level_sampling != "single":
+            raise ValueError("level_sampling_weights needs level_sampling='single'")
         self.train_tokens = train_tokens
         self.kd_lambda = kd_lambda
         self.kd_temperature = kd_temperature
         self.teacher_hf_model = teacher_hf_model
         self.num_levels_per_step = num_levels_per_step
         self.level_sampling = level_sampling
+        self.level_sampling_weights = tuple(level_sampling_weights) if level_sampling_weights else None
+        self.kd_form = kd_form
         self.lr = lr
         self.weight_decay = weight_decay
         self.warmup_ratio = warmup_ratio
@@ -274,6 +281,31 @@ II_MEDICAL_8B = "Intelligent-Internet/II-Medical-8B"
 # 8B teacher the run fits 2 x A40 on DAS-6 node205 with plain AdamW (no ZeRO-1).
 S1_1P7B = dict(preset="qwen3-1.7b-gqa", micro_batch_size=2)
 
+# KD-weight sweep (user, 2026-11-18): the final recipe at the pilot budget (FINAL_S1, FINAL_ORDERING, 20M tokens)
+# with HydraLLM's objective CE + lambda KL (kd_form "additive", T 2) for lambda 0.1 / 0.3 / 0.5. lambda 0 is
+# s1.qwen3_0p6b.pilot.final (CE only; its Stage 2 is job 28347). Teachers (logit KD needs Qwen3's token ids;
+# user: a teacher must have been trained on our PMC data with our logit scheme):
+#   corr = Qwen3-1.7B after 20M tokens of PMC (teacher correction, PMC ppl 5.57): the sweep's teacher;
+#   orig = the off-the-shelf Qwen3-1.7B (PMC ppl 7.92): teacher ablation at the best lambda.
+# A 7-8B teacher only after these pilots show that Stage-1 KD helps, and only PMC-corrected like `corr`.
+S1_KD_TEACHERS = {"corr": CORRECTED_TEACHER_1P7B, "orig": "Qwen/Qwen3-1.7B"}
+S1_KD_LAMBDAS = (0.1, 0.3, 0.5)
+# HydraLLM's width sampling (configs/train_llm/pt_hydra_default.yaml head_weights [1, 1, 1, 3],
+# trainer_hydravit.py random.choices): ONE width per step, the full width 3x as likely as each other width.
+# On the 9-width grid: weight 1 for each of the 8 narrower widths, 3 for the full width (P(full) = 3/11).
+HYDRA_WEIGHTS_9 = (1.0,) * 8 + (3.0,)
+HYDRA_SAMPLING = dict(level_sampling="single", level_sampling_weights=HYDRA_WEIGHTS_9,
+                      anchor_levels=None, num_levels_per_step=None)
+
+
+def kd_pilot_name(kd_lambda: float, teacher: str, hydra: bool = False) -> str:
+    """s1.qwen3_0p6b.pilot.final.kdadd0p1.corr[.hydra]"""
+    return f"s1.qwen3_0p6b.pilot.final.kdadd{str(kd_lambda).replace('.', 'p')}.{teacher}" + (".hydra" if hydra else "")
+
+
+S1_KD_PILOTS = [kd_pilot_name(lam, t, hydra) for t in S1_KD_TEACHERS for lam in S1_KD_LAMBDAS
+                for hydra in (False, True)]
+
 
 def make_stage1(train_tokens: int, wandb_project_name: str, ordering: str = "none",
                 fractions=(0.5, 0.75, 1.0), preset: str = "qwen3-0.6b", level_norms: bool = False,
@@ -310,6 +342,15 @@ def register_stage1_configs(configs: dict) -> None:
     # The final recipe at the pilot budget: comparable with the pilot table, and the gate for the 100M run.
     flex["s1.qwen3_0p6b.pilot.final"] = make_stage1(S1_PILOT_TOKENS, "MedNest_s1_pilot_final",
                                                     ordering=FINAL_ORDERING, **FINAL_S1)
+    for t, teacher in S1_KD_TEACHERS.items():
+        for lam in S1_KD_LAMBDAS:
+            for hydra in (False, True):
+                name = kd_pilot_name(lam, t, hydra)
+                overrides = dict(FINAL_S1, kd_lambda=lam, kd_form="additive", teacher_hf_model=teacher)
+                if hydra:
+                    overrides.update(HYDRA_SAMPLING)
+                flex[name] = make_stage1(S1_PILOT_TOKENS, "MedNest_" + name.replace("s1.qwen3_0p6b.pilot.final.", "s1_pilot_"),
+                                         ordering=FINAL_ORDERING, **overrides)
     flex["s1.qwen3_0p6b.full.w025"] = make_stage1(
         S1_FULL_TOKENS, "MedNest_s1_full_w025", ordering=FINAL_ORDERING,
         **dict(FINAL_S1, fractions=FRACTIONS_025, anchor_levels=None, num_levels_per_step=None))

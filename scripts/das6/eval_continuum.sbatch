@@ -11,11 +11,11 @@
 #SBATCH --output=jobs/%x-%j.out
 # Continuum-of-widths PMC val perplexity (eval/eval_continuum.py).
 #   sbatch scripts/das6/eval_continuum.sbatch <Stage-1 config> [extra args, e.g. --init]
-#   sbatch scripts/das6/eval_continuum.sbatch --hf <hf model dir or id>
+#   sbatch scripts/das6/eval_continuum.sbatch --hf <hf model dir or id> [extra args]
 source scripts/das6/common.sh gpu
 if [[ "$1" == "--hf" ]]; then
   OUT="results/pmcppl.$(echo "$2" | tr '/' '-').json"
-  python -m eval.eval_continuum --hf "$2" --out "$OUT"
+  python -m eval.eval_continuum --hf "$2" --out "$OUT" "${@:3}"   # e.g. --batch-size 2 for a 7-8B model on an A10
 else
   CFG=${1:?"usage: sbatch scripts/das6/eval_continuum.sbatch <config> [args] | --hf <model>"}
   shift
