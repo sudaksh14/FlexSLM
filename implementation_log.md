@@ -1024,3 +1024,145 @@ max_seq 3072):
   speed: host-side jitter, cause not found. On the Orin's slower CPU, TTFT may be dominated by launch overhead and
   hide the width effect. Mitigations if the board shows it: interleave and repeat width blocks (compare), report prefill
   also at long prompts, or CUDA-graph the prefill at bucketed prompt lengths. Decode (graph) is not affected.
+
+### 2026-11-18
+- **Completed 0.6B runs (single seed, 32-token answer-only, avg of 7 benchmarks; pooled McNemar over 12,797 questions):**
+  * **M3 final, KD (28230), 9 widths L0..L8 = 21.4 21.4 21.4 22.3 22.5 22.7 24.4 26.9 27.2**: flat at the guess-rate ceiling up
+    to ~0.8 width (408M), knee at 473M+. L8 vs conventional FT 23.1: +4.1 (pooled 30.2 vs 24.8, p 2e-32).
+  * **M3 CE-only (28241) L0..L8 = 21.6 21.1 21.7 21.7 21.7 21.9 21.5 22.2 22.6**: no separation at all (L8 vs M3-KD: 24.5 vs 30.2
+    pooled, p 1e-36). **Stage-2 KD from the fine-tuned 1.7B is what makes the full width work** (pilot: 29.8 KD vs 27.5 CE-only).
+  * **A1 no importance ordering (28258) L0/L4/L8 = 22.1 / 22.5 / 28.5** vs ordered 21.4 / 22.5 / 27.2: ordering does NOT help
+    downstream (L8 pooled 30.2 vs 30.7 for no-order, p 0.14; L4 p 0.56). It only helped Stage-1 perplexity.
+  * **Independent baselines (28252, 28255): 0.5 width 21.3 (nested L0 21.4, p 0.70), 0.75 width 22.3 (nested L4 22.5, p 0.12)**: nested == independent
+    at the narrow widths (accuracy parity; advantage = one model, memory, switching).
+  * **Final (100M, CE-only Stage 1, 9 widths) is WORSE than the 20M pilot (3 widths, Stage-1 KD 0.5 from untrained 1.7B):
+    L8 27.2 vs pilot L2 29.8 (pooled p 5e-9), 364M 22.5 vs 24.4.** Perplexity-selected recipe lost on accuracy. Confounded
+    (KD vs CE Stage 1, 3 vs 9 widths, 20M vs 100M tokens). Discriminating run not queued: Stage 2 on `s1.qwen3_0p6b.pilot.final`
+    (20M, CE-only, 9 widths). A2 (no Stage 1, 28274) and the full-width control (28332) are running.
+  * **Full-width Stage 1 control (28330):** PMC ppl 6.48 at full width vs nested 6.57 (nesting costs ~1.4% there); the other widths
+    of that model are untrained-by-design (1,124 ... 7.31).
+- **Controller / trace discussion:** the only switching policy in the repo is `elastic` in `jetson/bench_trace.py:131` (rule: widest width
+  whose PREDICTED latency in the current power mode meets the request's deadline, else narrowest; predictor = per-mode linear
+  fit TTFT(prompt tokens) + decode ms/token x p90 answer length from bench_widths records; the urgent/routine label is given).
+  Not covered: memory budget, energy/battery, temperature, accuracy/confidence. The old harness's exp09 is scaffolding only.
+  Trace results so far are validation on an A10 (toy): see the answer given to the user; not informative about the benefit.
+- **Queued (user, 2026-11-18): Stage 2 from the 20M final-recipe checkpoint** `sft.pilot.qwen3_0p6b_final9` (= M3's Stage 2: KD from the
+  fine-tuned 1.7B, 9-width grid, anchors + 1 random width; start = `s1.qwen3_0p6b.pilot.final`: 20M tokens, CE-only, 9 widths):
+  train **28347** (node205, afterany 28274, ~5.5 h) -> export **28348** (node207) -> eval levels 0-8 **28349-28357** (node207).
+  Reading: ~29.8 at the full width => the 100M budget is what hurts; ~27 => Stage-1 CE-only / 9 widths is. Config + test in
+  training/sft.py, test/test_continuum.py (17 pass), uncommitted.
+- **28263 (1.7B Stage 1, 100M, ~35 h) is on HOLD** (`scontrol hold 28263`; release with `scontrol release 28263`). It was queued on
+  2026-11-16, before any 0.6B Stage-2 result, as the 1.7B scaling run of the same recipe (CE-only, Minitron ordering, 100M, 9 widths);
+  that recipe gave a worse 0.6B model than the 20M pilot and the ordering showed no downstream benefit, so the 1.7B run would
+  inherit an unvalidated recipe. Decision pending with the user (cancel / release / run a ~7 h 20M 1.7B pilot of the fixed recipe first).
+- **HydraLLM comparison (user question, 2026-11-18; arXiv 2610.23455 + github tuhh-ncps/hydrallm @64c15ff, read in full):**
+  * Slicing operator = ours (prefix of embedding/residual, query heads with KV following, FFN, LM-head columns; one knob k).
+    Gemma 3 270M is MQA (1 KV head, never sliced), 4 widths 25/50/75/100%. "Head stacking" = one k sampled per step
+    (weights 1/1/1/3) = our `single` pilot, which was worse than all/anchor levels per step. Not a better method.
+  * Recipe (configs/train_llm/pt_hydra_default.yaml): FineWeb-Edu (general), seq 3,072, eff. batch 16, 20k steps =
+    **0.98B tokens** (long run 1M steps = 49B), lr 3e-4 cosine, wd 0.1, clip 1.0, z-loss 1e-5, **KD weight 0.1, T 2 from
+    the frozen ORIGINAL Gemma 3 270M** (same model, not bigger), KD on label tokens. Selected by downstream benchmarks.
+  * They do NOT heal the small widths on knowledge tasks: H1/H2 HellaSwag 26.2/26.9 (chance 25), TriviaQA 0.15/0.23 (full
+    pretrained ~11; H4 after training 5.5). Only ARC-Easy (log-likelihood scoring) separates (H2 46.3). 49x more tokens:
+    ARC-E +4-5, HellaSwag +0-2, TriviaQA worse (H4 5.5 -> 3.6). No-teacher ablation halves TriviaQA (H4 5.5 -> 2.2).
+  * Their LM-level recovery is weaker than ours: ppl 50%/100% = 71.6/44.3 = 1.62x; ours 0.5/1.0 = 9.02/6.57 = 1.37x.
+  * Our budget: Stage 1 100M = 10x fewer tokens; per non-embedding parameter 0.23 vs ~10 tok/param.
+- **Full-width control done (28330 -> 28332 -> 28334), Stage 1 final recipe at full width only + Stage 2:** 36.1/37.2/43.5/
+  25.6/28.9/16.1/10.4 = **avg 28.3** (M3 nested L8 27.2, pilot L2 29.8). Nesting costs ~1 point at full width (1 seed);
+  the 20M KD pilot beats the full-width-only model of the final recipe => the final Stage-1 recipe (CE only on PMC), not
+  nesting, is the regression. Together with indep 0.5/0.75 == nested: narrow widths are at the guess rate because of
+  capacity x task (medical MCQ is knowledge-heavy like TriviaQA), not because of the nested recipe.
+- Proposed pilots (waiting for user): P0 log-likelihood (cloze) eval of existing exports per width (medqa/medmcqa cloze +
+  ARC-E + HellaSwag; needs lm-eval in our overlay); P1 Stage 1 20M CE + KD 0.1 T2 (teacher choice = user decision:
+  original Qwen3-1.7B complies with the bigger-teacher rule, original Qwen3-0.6B = HydraLLM-exact); P2 = P1 + 50%
+  FineWeb-Edu replay. More Stage-1 tokens is not recommended (28347 already tests 20M vs 100M).
+- **User decisions (2026-11-18, later):** (1) medical data ONLY in every stage, no general data; other medical corpora may
+  be mixed in; (2) teacher ablation with several teachers, incl. medical SOTA models; (3) KD-weight pilots 0.1 / 0.3 / 0.5
+  with the same (final) recipe; (4) question: provenance of eval protocols / cloze / OLMES; (5) END GOAL: be better than or
+  on par with FaithMed and Apollo at matched FLOPs and parameter count.
+- **Teacher compatibility (HF hub, 2026-11-18; logit KD needs identical token ids):** vocab.json/merges.txt blob ids identical
+  to Qwen3 (4783fe10ac3a / 31349551d90c) for Apollo-0.5B (qwen2), Apollo2-0.5B (qwen2), **Apollo2-7B** (qwen2, vocab padded
+  to 152,064 -> slice logits to 151,936), **II-Medical-8B** (qwen3), HuatuoGPT-o1-7B (same merges; Qwen2.5). NOT compatible
+  (Gemma, 256k vocab): Apollo-7B, Apollo2-2B. FaithMed: still no checkpoints on the hub. Apollo-0.5B / Apollo2-0.5B are
+  weaker than our student (20.9 / 21.7 vs 29.8) -> not teachers. Known PMC ppl: Qwen3-1.7B 7.92, II-Medical-8B 7.46,
+  corrected 1.7B 5.57; our final student full width 6.57.
+- Medical corpora on the hub (ungated): FreedomIntelligence/ApolloCorpus (apache-2.0), MedRAG/textbooks (MedQA's 18
+  textbooks), MedRAG/statpearls, MedRAG/pubmed, epfl-llm/guidelines (license "other"); licences to check per source.
+- Protocol provenance: generation protocol = FaithMed's scoring (`rewards/medmix_reward.py` re-implemented in
+  eval/eval_gen.py), thinking off, 32 tokens; `eval/medcloze/*.yaml` are our own lm-eval-harness tasks ("Question: ..
+  \nAnswer:" + answer text, acc/acc_norm; MMLU medical via lm-eval's `*_continuation` tasks; medmcf = letter format);
+  OLMES is only cited (gu2025olmes), not implemented; lm-eval is not installed in the current DAS-6 overlay.
+- **User decisions (2026-11-18, evening):** (1) go ahead with the eval-only step (teacher screen + inference-compute
+  curve); (2) a 7-8B teacher only after the pilots show that Stage-1 KD helps, and only if that teacher was trained on
+  our PMC data with our logit scheme (i.e. PMC-corrected like the 1.7B); (3) run the inference-compute comparison for
+  FaithMed; (4) **28263 (1.7B Stage 1) CANCELLED** (`scancel`, done) until the recipe is final; (5) Stage-1 objective =
+  HydraLLM's **CE + lambda KL**, sweep lambda 0.1 / 0.3 / 0.5; (6) pilot HydraLLM's weighted sampling (one width per
+  step, full width 3x as likely); keep it as default if faster at similar accuracy.
+- **A2 no Stage 1 (28274 -> evals) done: L0/L1/L2 (0.5/0.75/1.0) = 20.8 / 22.7 / 30.5 avg (pooled full width 33.4).**
+  Full width beats the 20M KD pilot (pooled 32.5, p 0.015) and M3 (30.2, p < 1e-4): **so far Stage 1 on PMC does not
+  help downstream at any width** (narrow widths also equal M3's). The KD sweep tests whether KD from the PMC-corrected
+  teacher changes that; if no arm beats A2, the honest recipe is "no Stage 1" (or Stage 1 must be justified otherwise).
+- **Code (uncommitted, 51 tests pass, job 28360):** `training/trainer.py` `kd_mix` / `KD_FORMS` (convex = old default,
+  additive = CE + lambda KL) used by FlexLMKDTrainer and MemOptFlexLMKDTrainer; `level_sampling_weights` for
+  `level_sampling="single"` (`random.choices`, seeded by (seed, step); weights None keeps the old `choice` draws).
+  `training/stage1.py`: `Stage1Context.kd_form`, `.level_sampling_weights`; `S1_KD_TEACHERS` (corr = PMC-corrected 1.7B,
+  orig = Qwen3-1.7B), `S1_KD_LAMBDAS`, `HYDRA_WEIGHTS_9` = (1 x8, 3) (P(full) 3/11), `kd_pilot_name`, 12 configs
+  `s1.qwen3_0p6b.pilot.final.kdadd{0p1,0p3,0p5}.{corr,orig}[.hydra]` (= pilot.final + KD). `training/sft.py`: Stage 2
+  `sft.pilot.qwen3_0p6b_final9.<same suffix>[.1gpu]` = exactly final9's (M3's) Stage 2. `eval/eval_gen.py`:
+  `--prompt_format think` (Qwen3 thinking ON), `--budgets` (accuracy at every smaller decoding budget from one
+  generation: a truncated greedy/sampled trajectory IS the smaller-budget run), `--per_source N`, `--temperature/
+  --top_p/--top_k/--seed`, per-sample `gen_tokens` / `prompt_tokens`. evalgen.sbatch env BUDGETS / PER_SOURCE /
+  SAMPLE=qwen3; eval_continuum.sbatch --hf passes extra args; new scripts/das6/pytest.sbatch,
+  scripts/das6/queue_2026-11-18.sh, test/test_kd_sweep.py. test/test_experiment_banner.py is stale (imports a removed
+  `_print_experiment_banner`; pre-existing, not touched).
+- **Queued 2026-11-18 16:51 (jobs/queue_2026-11-18.ids):** tests 28361 -> smoke 28362 (kdadd0p1.corr) -> 28363 (.hydra),
+  node206. Stage 1 (20M, lambda additive, corrected teacher): **lambda 0.1 28364 (node205, after 28347)**, **Hydra lambda 0.1
+  28365**, **lambda 0.3 28366**, **lambda 0.5 28367** (node206); PMC continuum 28368-28371. Stage 2 (node205) -> export
+  -> eval levels 0/4/8: 0.1 28372 -> 28373 -> 28374-76; hydra 28377 -> 28378 -> 28379-81; 0.3 28382 -> 28383 -> 28384-86;
+  0.5 28387 -> 28388 -> 28389-91. lambda 0 = 28347 chain. Teacher screen (PMC ppl, node207): Apollo2-7B 28392,
+  HuatuoGPT-o1-7B 28393, Qwen3-8B 28394. Inference-compute curve (node207; thinking on, Qwen3 sampling T 0.6 / p 0.95 /
+  k 20 seed 0, 300 questions per set, budgets 64..4096): smoke 28395 -> Qwen3-1.7B 28396, Qwen3-0.6B 28397.
+  Compare MedNest at 32 tokens on the same 2,100 questions (first 300 per set of the existing samples files).
+- Next: teacher ablation (orig 1.7B) at the best lambda; Hydra sampling becomes default only if its L8/L4 are within
+  noise of the lambda-0.1 sandwich arm (pooled McNemar) — it takes ~1/2 of the Stage-1 time. Paper TODOs (no edits now):
+  Stage-1 objective form, A2 result, inference-compute figure.
+- **Paper rewritten (user, 2026-11-18): ONE re-training step.** `paper/main.tex` = ordering + nested SFT with KD (the old
+  Stage 2) only; every Stage-1 (PMC pre-training) section, table, the continuum figure and the cost table were removed;
+  PMC pre-training appears only as one ablation row (+20M tokens: 20.9/24.4/29.8 vs 20.8/22.7/30.5; full width p 0.015,
+  364M p 0.008, 188M p 0.19). Backups of the two-stage version: `paper/main_backup_2026-11-18.tex`,
+  `references_backup_2026-11-18.bib`, old PDF `MedNest_IEA-AIE2027_draft_backup_2026-11-17.pdf`. New PDF
+  `paper/MedNest_IEA-AIE2027_draft.pdf` (12 pages incl. refs, builds clean).
+  Main result = A2 (`sft.paper.qwen3_0p6b_nested.no_stage1`, 3 widths): 30.5/22.7/20.8. Pooled McNemar (computed locally
+  from copied samples): L2 vs conventional +8.5 pooled (2,567 vs 1,473, p<1e-4); L1 vs conventional 25.2 vs 24.8 p 0.35
+  (w/o Calc 0.42); L0 vs conventional -1.3 p 0.001; vs MatFormer all widths p<1e-4; L2 vs untrained t1024 p<1e-4; L2 vs
+  FT 1.7B -6.5. Apollo (L2): 0.5B/Apollo2-0.5B/1.8B/2B all p<1e-3 also w/o Calc; Apollo2-2B overall p 0.15, w/o Calc
+  33.9 vs 35.6 pooled p 0.0013 (Apollo better). L1 vs 0.5B Apollos: better overall (p 0.026/0.008) only via MedCalc;
+  w/o Calc below (p 0.026/0.12). Cost: A2 4:15:47 on 2xA40 (28274), teacher E_A 3:01:01 (28131) -> ~15 GPU-h.
+  **Placeholders (red) needing runs NOT yet queued:** Stage-2-only ablations (no KD, no ordering, one random width per
+  step), independent 188M/364M (SFT only), 1.7B MedNest (ordering + nested SFT; teacher decision: bigger teacher or CE
+  only), Jetson table. FaithMed table rows wait for 28396/28397 (+ prompt-token counts -> GFLOPs). Bib still has the old
+  "VERIFY" notes in several entries.
+- **Hipster queue 2026-11-18 17:27 (scripts/hipster/queue_2026-11-18.sh; ids in ~/FlexSLM-medbench/queue_2026-11-18.hipster.ids),
+  all capacity (performance --test-only said 2026-12-04; user: ignore estimates, queue and wait):** migrate_to_home
+  397255 (data/results/jobs/HF cache -> /home; SKIP_JOB_CHECK) -> fetch exports from DAS-6 397256 (E_A teacher,
+  qwen3-0.6b.minitron, qwen3-1.7b.minitron -> /scratch hf_export) + tests 397257 -> smoke 397258 (0.6B single, 2xL4)
+  397259 (1.7B, 4xL4 ZeRO-1 + act. ckpt) -> trainings (A2 + one change; 0.6B on 2xL4, micro-batch 4, same 32/step):
+  no_kd 397260 (export 397261, evals 397262-64), no_order 397265 (397266, 397267-69), single 397270 (397271,
+  397272-74), indep_l0 397275 (397276, 397277), indep_l1 397278 (397279, 397280), indep_l2 (full width alone WITH KD)
+  397281 (397282, 397283), 1.7B MedNest CE-only `sft.paper.qwen3_1p7b_nested.no_stage1` 397284 (397285, 397286-88).
+  Results land in ~/FlexSLM-medbench/results (home). New: scripts/hipster/{pytest,fetch_exports,export}.sbatch,
+  hipster evalgen -> capacity L4; configs in training/sft.py, test in test/test_kd_sweep.py.
+- Paper: ablation table separates "independent (with KD)" (tbd) from "conventional FT (no KD)" 23.1.
+  Note (user question): the 1.7B teacher = full-width conventional FT only (train_levels [2], CE, no clip), not nested.
+- **W&B consolidated into the single project `MedNest` (user, 2026-11-18); old per-config projects deleted.** node208 was used for
+  these jobs on the user's explicit OK (standing rule unchanged: node208 only when told). Procedure (`scripts/wandb_to_mednest.py`):
+  copy the two remaining finished runs (28230 ouvny4cs, 28206 qp73a2io) -> verify every old run against its copy (run id, name, group,
+  state, history rows, config, final summary: **42 of 42 OK**; two fresh copies needed a second pass because W&B summaries lag a few
+  seconds) -> back up every old run (config, summary, full history) as JSON in
+  `/var/scratch/skalra/flexslm/wandb_backup_2026-11-18/<project>/<run id>.json` (42 files, 3.6 MB) -> delete the old projects with
+  the GraphQL `deleteModel` mutation (wandb 0.19.11 has no project-delete call; one project first as a test, then the other 38).
+  **39 projects (`MedNest_*`, 42 runs) deleted, no empty shells left.** Untouched on purpose: the entity's unrelated projects
+  (FlexLLaVA, FlexViT, ViT-ImageNet-Adaptivity, FlexLLaMA_*, Scala, dimenet++, huggingface, segmenter, ...). `MedNest` now has 52
+  runs (47 finished, 3 failed = the crashed copies, 2 running: A2 28274 and the full-width Stage 2 28332), grouped by the old
+  per-config name (group + tag). New runs go to `MedNest` directly (config/wandb.py). The jobs' local wandb run directories under
+  `/var/scratch/skalra/flexslm/store/wandb/job_*` also still exist. `scripts/wandb_inventory.py` = read-only inventory.

@@ -306,3 +306,16 @@ def test_full_width_control_is_the_final_recipe_on_the_full_width_only():
            (m3.teacher_hf_model, m3.kd_lambda, m3.lr, m3.micro_batch_size)
     bs = lambda ctx: ctx.loader_function.keywords["batch_size"]
     assert bs(s2) == 2 * bs(m3) == 32  # 1 GPU x 32 = 2 GPUs x 16
+
+
+def test_pilot_final9_stage2_is_m3_stage2_from_the_20m_final_recipe_checkpoint():
+    from training.run_experiment import resolve_from_str
+    c = resolve_from_str("flexllama,sft.pilot.qwen3_0p6b_final9").training_context
+    m3 = resolve_from_str("flexllama,sft.paper.qwen3_0p6b_nested").training_context
+    assert c.load_from == "flexllama,s1.qwen3_0p6b.pilot.final"
+    for k in ("teacher_hf_model", "kd_lambda", "kd_temperature", "lr", "anchor_levels", "num_levels_per_step",
+              "micro_batch_size", "gradient_clip_val", "seed"):
+        assert getattr(c, k) == getattr(m3, k), k
+    assert c.anchor_levels == (0, 4, 8) and c.train_levels is None
+    s1 = resolve_from_str("flexllama,s1.qwen3_0p6b.pilot.final").training_context
+    assert s1.train_tokens == 20_000_000 and s1.kd_lambda == 0.0
