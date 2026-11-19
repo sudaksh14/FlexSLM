@@ -1210,3 +1210,16 @@ max_seq 3072):
   28433, 28434-36), lambda 0.5 28437 (28438, 28439, 28440, 28441-43); rescore of the 1.7B curve 28444; 0.6B curve 28405 running.
   Hipster `scripts/hipster/queue_2026-11-19.sh`: tests 398150 -> smokes 398151 / 398152 -> 7 trainings 398153 ... 398177 (+ exports,
   evals) as in the 2026-11-18 chain (ids in ~/FlexSLM-medbench/queue_2026-11-19.hipster.ids).
+- **Hipster (2026-11-19 15:50 check):** not rebooted (up 76 days). Tests 398150 passed. **Smoke 398151 (0.6B, 2 x L4 24 GB, micro-batch 4)
+  ran OUT OF MEMORY** in sft.py's KL (22 GB card; the DAS-6 recipe needs ~21 GB at micro-batch 8 on a 48 GB A40) and hung; my
+  `scancel -n a,b,c` had also not cancelled the 2026-11-18 chain (7 trainings on DependencyNeverSatisfied). Per the hipster rules
+  (multi-GPU / > 24 GB -> performance) everything moved to **performance, 2 x RTX 6000 Ada 48 GB, 16 per GPU x 2 = 32 per step,
+  micro-batch 8 (0.6B) / 4 (1.7B) = A2's and sft.paper.qwen3_1p7b_nested's settings; the L4-specific micro-batch / ZeRO /
+  checkpointing overrides were dropped.** Cancelled every flexslm job there and resubmitted (queue_2026-11-19.sh, ids in
+  ~/FlexSLM-medbench/queue_2026-11-19b.hipster.ids): tests 398291 -> smokes 398292 (0.6B single) / 398293 (1.7B) -> trainings
+  398294 (no_kd), 398299 (no_order), 398304 (single), 398309 (indep_l0), 398312 (indep_l1), 398315 (indep_l2), 398318 (1.7B),
+  each with export (398295 ...) and 32-token evals on capacity L4. Per-user QoS cap 256 CPUs in performance = 4 concurrent
+  2-GPU jobs at most.
+- **DAS-6 back after the maintenance (15:48):** rebooted ~14:05, nodes 205-207 up (204 down since April), jobs survived: running
+  28418 (Hydra Stage 2, node205), 28430 (lambda 0.3 Stage 1, node206), 28405 (0.6B reasoning curve, node207; it RESTARTED from
+  scratch, was at 1600/2098 before).

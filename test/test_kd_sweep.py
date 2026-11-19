@@ -174,13 +174,13 @@ def test_stage2_only_ablations_change_one_thing_each():
             want = diff.get(k, getattr(b, k))
             got = getattr(c, k)
             assert (list(got) if isinstance(got, tuple) else got) == (list(want) if isinstance(want, tuple) else want), (tag, k)
-        assert c.load_from is None and c.micro_batch_size == 4 and b.micro_batch_size == 8
+        assert c.load_from is None and c.micro_batch_size == b.micro_batch_size == 8
         if tag == "no_order":
             assert m.model_config.pretrained_hf_model == "Qwen/Qwen3-0.6B" != base.model_config.pretrained_hf_model
         else:
             assert m.model_config == base.model_config
     big = resolve_from_str("flexllama,sft.paper.qwen3_1p7b_nested.no_stage1")
     bc = big.training_context
-    assert bc.zero_optimizer and bc.activation_checkpointing and bc.loader_function.keywords["batch_size"] * 4 == 32
+    assert bc.micro_batch_size == 4 and bc.loader_function.keywords["batch_size"] * 2 == 32 and not bc.zero_optimizer
     assert big.training_context.kd_lambda == 0.0 and list(big.model_config.hidden_dims) == [1024, 1536, 2048]
     assert big.model_config.pretrained_hf_model.endswith("qwen3-1.7b.minitron")

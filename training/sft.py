@@ -149,9 +149,9 @@ SFT_RUNS = [
     *[(f"sft.paper.qwen3_0p6b_nested.no_stage1.{tag}", None, {
         **_S2, "hf_preset": "qwen3-0.6b", "level_fractions": (0.5, 0.75, 1.0),
         "hf_start": start_weights(FINAL_ORDERING),
-        # hipster capacity (2 x L4 24 GB): micro-batch 4 instead of 8, the same 16 per GPU x 2 = 32 per step
-        # (micro-batches split a step exactly, so the update is A2's). `change` may override hf_start.
-        "micro_batch_size": 4, **change, "wandb_project_name": f"MedNest_s2only_{tag}"})
+        # Same settings as A2 (hipster performance: 2 x RTX 6000 Ada 48 GB, 16 per GPU, micro-batch 8: an L4 with
+        # 22 GB ran out of memory in the smoke test 398151). `change` may override hf_start.
+        **change, "wandb_project_name": f"MedNest_s2only_{tag}"})
       for tag, change in (
           ("no_kd", dict(kd_lambda=0.0)),                                   # CE on the answers only
           ("no_order", dict(hf_start=start_weights("none"))),               # original Qwen3-0.6B order
@@ -165,10 +165,7 @@ SFT_RUNS = [
     ("sft.paper.qwen3_1p7b_nested.no_stage1", None, dict(_S2,
         hf_preset="qwen3-1.7b-gqa", level_fractions=(0.5, 0.75, 1.0),
         hf_start=start_weights(FINAL_ORDERING, hf_model="Qwen/Qwen3-1.7B", preset="qwen3-1.7b-gqa"),
-        kd_lambda=0.0, tokenizer_name="Qwen/Qwen3-1.7B",
-        # hipster capacity (4 x L4 24 GB): 8 per GPU x 4 = 32 per step, micro-batch 2, ZeRO-1 (Adam state
-        # sharded over the 4 ranks) and activation checkpointing to fit 1.7B fp32 weights + grads in 24 GB.
-        batch_size=8, micro_batch_size=2, zero_optimizer=True, activation_checkpointing=True,
+        kd_lambda=0.0, tokenizer_name="Qwen/Qwen3-1.7B", micro_batch_size=4,   # as sft.paper.qwen3_1p7b_nested
         wandb_project_name="MedNest_s2only_1p7b")),
     # A1: no importance ordering (Stage 1 and Stage 2 both without it).
     ("sft.paper.qwen3_0p6b_nested.no_order", "s1.qwen3_0p6b.full.no_order", dict(_S2,

@@ -10,18 +10,20 @@
 #     each -> CPU export (capacity) -> 32-token evals (capacity, 1 L4) of the trained levels.
 set -eo pipefail
 cd ~/FlexSLM-medbench
-IDS=queue_2026-11-19.hipster.ids   # repo root until jobs/ is a real directory (moved by the migration)
+IDS=queue_2026-11-19b.hipster.ids   # repo root until jobs/ is a real directory (moved by the migration)
 # capacity (L4 24 GB, 16 CPUs per GPU): performance was estimated to start only on 2026-12-04 (sbatch --test-only).
-C2="--partition=capacity --gres=gpu:l4:2 --ntasks-per-node=2 --cpus-per-task=16"
-C4="--partition=capacity --gres=gpu:l4:4 --ntasks-per-node=4 --cpus-per-task=16"
+# performance (RTX 6000 Ada 48 GB, 32 CPUs per GPU enforced): 2-GPU trainings that need > 24 GB (hipster rules). The first
+# smoke on capacity L4s ran out of memory (398151). 0.6B and 1.7B both: 16 per GPU x 2 = 32 per step, as on DAS-6.
+C2="--partition=performance --gres=gpu:rtx_6000_ada:2 --ntasks-per-node=2 --cpus-per-task=32"
+C4="$C2"
 sub() { sbatch --parsable "$@"; }
 note() { echo "$*" | tee -a "$IDS"; }
 note "=== $(date '+%F %T')"
 
 # 2026-11-19 recovery: migrate (397255) and fetch (397256) finished; the 2026-11-18 chain died on an import error in
 # training/sft.py (fixed). Everything still pending was cancelled first.
-scancel -u "$USER" -t PENDING -n flexslm_train,flexslm_export,flexslm_evalgen,flexslm_pytest || true
-note "cancelled all pending flexslm_{train,export,evalgen,pytest} of the 2026-11-18 chain"
+for n in flexslm_train flexslm_export flexslm_evalgen flexslm_pytest; do scancel -u "$USER" -n $n || true; done
+note "cancelled every flexslm_{train,export,evalgen,pytest} job (old chain + the hung smoke 398151)"
 T=$(sub scripts/hipster/pytest.sbatch test/test_kd_sweep.py test/test_continuum.py test/test_level_weights.py)
 note "tests $T"
 A=sft.paper.qwen3_0p6b_nested.no_stage1
@@ -39,10 +41,10 @@ run() {  # <gpus flags var> <config> <time> <levels...>
 }
 # A2 took 4.3 h on 2 x A40 (3 levels); an L4 is slower (~1.3-1.5x), one level ~1/2 of the time;
 # 1.7B, 3 levels, CE, ZeRO-1 + checkpointing on 4 x L4 ~10 h. --time = 2x.
-run C2 $A.no_kd    14:00:00 0 1 2
-run C2 $A.no_order 14:00:00 0 1 2
-run C2 $A.single   10:00:00 0 1 2
-run C2 $A.indep_l0 08:00:00 0
-run C2 $A.indep_l1 08:00:00 1
-run C2 $A.indep_l2 10:00:00 2
-run C4 sft.paper.qwen3_1p7b_nested.no_stage1 24:00:00 0 1 2
+run C2 $A.no_kd    10:00:00 0 1 2
+run C2 $A.no_order 10:00:00 0 1 2
+run C2 $A.single   08:00:00 0 1 2
+run C2 $A.indep_l0 06:00:00 0
+run C2 $A.indep_l1 06:00:00 1
+run C2 $A.indep_l2 08:00:00 2
+run C4 sft.paper.qwen3_1p7b_nested.no_stage1 16:00:00 0 1 2
