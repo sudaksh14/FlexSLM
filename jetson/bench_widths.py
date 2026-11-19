@@ -106,6 +106,19 @@ def run_block(w, args, target: dict, model, tokenizer, rows, idle_w, extra: dict
     return summ
 
 
+def _evict_page_cache(d):
+    """Drop the file pages of a model dir from the page cache (no sudo): posix_fadvise DONTNEED."""
+    os.sync()
+    for f in os.listdir(d):
+        fp = os.path.join(d, f)
+        if os.path.isfile(fp):
+            fd = os.open(fp, os.O_RDONLY)
+            try:
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            finally:
+                os.close(fd)
+
+
 def main():
     p = base_parser(__doc__)
     p.add_argument("--elastic", default=None, help="MedNest export dir (level<i>/ subdirs)")
@@ -172,7 +185,11 @@ def main():
         try:
             has_weights = any(f.endswith((".safetensors", ".bin")) for f in os.listdir(spec["dir"]))
             if has_weights:
-                m = AutoModelForCausalLM.from_pretrained(spec["dir"], torch_dtype=dtype, trust_remote_code=remote).to(args.device).eval()
+                m = AutoModelForCausalLM.from_pretrained(spec["dir"], torch_dtype=dtype, trust_remote_code=remote)
+                _evict_page_cache(spec["dir"])   # CPU copy + page cache of the file would leave < the weight size free (8 GB shared)
+                m = m.to(args.device).eval()
+                gc.collect()
+                _evict_page_cache(spec["dir"])   # the KV cache allocation after this needs the same headroom
             else:   # config-only dir: random weights, same shapes (shape-only latency/memory/energy)
                 from transformers import AutoConfig
                 torch.manual_seed(0)
