@@ -146,11 +146,12 @@ SFT_RUNS = [
         wandb_project_name="MedNest_s2_no_stage1")),
     # 2026-11-18 (user): the paper's method is A2 above (ordering + nested SFT with KD, NO Stage 1). Its
     # ablations, independent baselines and the 1.7B backbone, each = A2 with one change (run on hipster):
-    *[(f"sft.paper.qwen3_0p6b_nested.no_stage1.{tag}", None, dict(_S2,
-        hf_preset="qwen3-0.6b", level_fractions=(0.5, 0.75, 1.0), hf_start=start_weights(FINAL_ORDERING),
+    *[(f"sft.paper.qwen3_0p6b_nested.no_stage1.{tag}", None, {
+        **_S2, "hf_preset": "qwen3-0.6b", "level_fractions": (0.5, 0.75, 1.0),
+        "hf_start": start_weights(FINAL_ORDERING),
         # hipster capacity (2 x L4 24 GB): micro-batch 4 instead of 8, the same 16 per GPU x 2 = 32 per step
-        # (micro-batches split a step exactly, so the update is A2's).
-        **{"micro_batch_size": 4, **change, "wandb_project_name": f"MedNest_s2only_{tag}"}))
+        # (micro-batches split a step exactly, so the update is A2's). `change` may override hf_start.
+        "micro_batch_size": 4, **change, "wandb_project_name": f"MedNest_s2only_{tag}"})
       for tag, change in (
           ("no_kd", dict(kd_lambda=0.0)),                                   # CE on the answers only
           ("no_order", dict(hf_start=start_weights("none"))),               # original Qwen3-0.6B order

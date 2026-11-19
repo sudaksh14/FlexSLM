@@ -1190,3 +1190,23 @@ max_seq 3072):
   Pending jobs and their dependency chains survive. DAS-6 (ReturnToService=1): after an unexpected reboot the nodes stayed DOWN
   until an admin resumed them (2026-11-12 -> 11-13); hipster has ReturnToService=2 (nodes return by themselves).
   Evals / exports / continuum jobs restart from scratch (short). Stage-1 runs resume the same way.
+
+### 2026-11-19
+- **Overnight failure (my bug):** training/sft.py (ablation configs of 2026-11-18) passed `hf_start` twice for `no_order` ->
+  TypeError on import of config.experiments -> every job that started after the 2026-11-18 evening sync died: DAS-6 28364,
+  28366, 28367 (Stage 1), 28348 (export of the finished 28347), 28369 (continuum), 28377 (Stage 2 Hydra); hipster 397258/59
+  (smokes; they caught it) and 397369 (tests); all their dependents sat on DependencyNeverSatisfied. Fixed in sft.py (dict
+  merge); **52 tests pass (DAS-6 28406, incl. test_stage2_only_ablations_change_one_thing_each)**. Lesson: run the unit tests
+  AFTER the last code edit and before queueing (the 28361 run predated the ablation configs).
+- **Finished:** 28347 (Stage 2 of the 20M final-recipe pilot, 5 h 29 min on 2 x A40, val answer-token acc 0.826 ... 0.853 over the
+  9 widths); 28365 (Stage 1, Hydra sampling, additive lambda 0.1, corrected 1.7B teacher, 20M tokens): **PMC ppl L0..L8 = 15.30 / 13.70
+  / 12.10 / 10.90 / 10.20 / 9.61 / 8.89 / 8.26 / 7.87** vs CE-only sandwich pilot.final 12.60 ... 9.18 ... 7.27 (worse at every
+  width; accuracy needs its Stage 2); 28392-94 teacher screen (PMC val ppl, same 640 x 1,024 windows): **HuatuoGPT-o1-7B 5.013,
+  Qwen3-8B 5.574, Apollo2-7B 5.652** (Qwen3-1.7B 7.92, II-Medical-8B 7.46, corrected 1.7B 5.57, our student 6.57); 28395/28396
+  reasoning-curve smoke and Qwen3-1.7B thinking run (2,098 questions; JSON has budget 64 only -> rescore 28444).
+- **Resubmitted (maintenance 2026-11-19 ~13:00 was imminent; queued at 12:56):** DAS-6 `scripts/das6/queue_2026-11-19.sh`
+  (ids in jobs/queue_2026-11-19.ids): export 28407 + evals L0-8 28408-16 (of 28347); Hydra continuum 28417, Stage 2 28418, export 28419, evals
+  28420-22; Stage 1 lambda 0.1 28423 (continuum 28424, Stage 2 28425, export 28426, evals 28427-29), lambda 0.3 28430 (28431, 28432,
+  28433, 28434-36), lambda 0.5 28437 (28438, 28439, 28440, 28441-43); rescore of the 1.7B curve 28444; 0.6B curve 28405 running.
+  Hipster `scripts/hipster/queue_2026-11-19.sh`: tests 398150 -> smokes 398151 / 398152 -> 7 trainings 398153 ... 398177 (+ exports,
+  evals) as in the 2026-11-18 chain (ids in ~/FlexSLM-medbench/queue_2026-11-19.hipster.ids).
