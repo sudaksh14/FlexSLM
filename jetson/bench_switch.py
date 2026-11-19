@@ -144,38 +144,78 @@ def main():
     if not can_drop:
         print("  [switch] no passwordless sudo for drop_caches: load timings are warm-cache only", flush=True)
 
-    if "A" not in args.skip:
-        elastic_switches(w, args, "view", dirs, levels, ids, dtype)
-    if "B" not in args.skip:
-        elastic_switches(w, args, "materialize", dirs, levels, ids, dtype)
-    if "C" not in args.skip:
-        load_timings(w, args, "separate_model", lambda l: AutoModelForCausalLM.from_pretrained(
-            dirs[l], torch_dtype=dtype).to(args.device).eval(), levels, ids, can_drop)
-    if "D" not in args.skip:
-        cfgs = {l: AutoConfig.from_pretrained(dirs[l]) for l in levels}
-        load_timings(w, args, "slice_from_full", lambda l: load_width_from_full(
-            dirs[max(dirs)], cfgs[l], device=args.device, dtype=dtype), levels, ids, can_drop)
-    if "E" not in args.skip:
-        from mednest_jetson.measure import MemPoller, param_bytes
+    try:
+        if "A" not in args.skip:
+            elastic_switches(w, args, "view", dirs, levels, ids, dtype)
+    except RuntimeError as exc:   # does not fit in the 8 GB shared memory: a result, not a crash
+        if "INTERNAL ASSERT" not in str(exc) and "out of memory" not in str(exc).lower():
+            raise
+        print("  [switch] step A: DOES NOT FIT in device memory", flush=True)
+        w.write({"kind": "oom", "step": "A", "error": str(exc)[:300]})
         gc.collect()
         torch.cuda.empty_cache()
-        with MemPoller() as mp:
-            ms = [AutoModelForCausalLM.from_pretrained(dirs[l], torch_dtype=dtype).to(args.device) for l in levels]
-        allres = sum(param_bytes(m) for m in ms)
-        del ms
+    try:
+        if "B" not in args.skip:
+            elastic_switches(w, args, "materialize", dirs, levels, ids, dtype)
+    except RuntimeError as exc:   # does not fit in the 8 GB shared memory: a result, not a crash
+        if "INTERNAL ASSERT" not in str(exc) and "out of memory" not in str(exc).lower():
+            raise
+        print("  [switch] step B: DOES NOT FIT in device memory", flush=True)
+        w.write({"kind": "oom", "step": "B", "error": str(exc)[:300]})
         gc.collect()
         torch.cuda.empty_cache()
-        bits = torch.finfo(dtype).bits
-        e = el.ElasticModel.load(dirs[max(dirs)], [dirs[l] for l in sorted(dirs)], device=args.device, dtype=dtype)
-        e.build_all()
-        rec = {"kind": "memory", "levels": levels, "all_separate_resident_bytes": allres,
-               "all_separate_peak_sys_mem_mb": mp.peak_mb, "sys_mem_before_mb": mp.start_mb,
-               "elastic_resident_bytes": e.unique_param_bytes(),
-               "all_9_separate_bytes_computed": sum(s.params for s in e.specs) * bits // 8}
-        w.write(rec)
-        print(f"  memory: elastic {rec['elastic_resident_bytes'] / 1e9:.2f} GB for {len(e.specs)} widths vs "
-              f"{allres / 1e9:.2f} GB for {len(levels)} separate models resident "
-              f"({rec['all_9_separate_bytes_computed'] / 1e9:.2f} GB for all {len(e.specs)})", flush=True)
+    try:
+        if "C" not in args.skip:
+            load_timings(w, args, "separate_model", lambda l: AutoModelForCausalLM.from_pretrained(
+                dirs[l], torch_dtype=dtype).to(args.device).eval(), levels, ids, can_drop)
+    except RuntimeError as exc:   # does not fit in the 8 GB shared memory: a result, not a crash
+        if "INTERNAL ASSERT" not in str(exc) and "out of memory" not in str(exc).lower():
+            raise
+        print("  [switch] step C: DOES NOT FIT in device memory", flush=True)
+        w.write({"kind": "oom", "step": "C", "error": str(exc)[:300]})
+        gc.collect()
+        torch.cuda.empty_cache()
+    try:
+        if "D" not in args.skip:
+            cfgs = {l: AutoConfig.from_pretrained(dirs[l]) for l in levels}
+            load_timings(w, args, "slice_from_full", lambda l: load_width_from_full(
+                dirs[max(dirs)], cfgs[l], device=args.device, dtype=dtype), levels, ids, can_drop)
+    except RuntimeError as exc:   # does not fit in the 8 GB shared memory: a result, not a crash
+        if "INTERNAL ASSERT" not in str(exc) and "out of memory" not in str(exc).lower():
+            raise
+        print("  [switch] step D: DOES NOT FIT in device memory", flush=True)
+        w.write({"kind": "oom", "step": "D", "error": str(exc)[:300]})
+        gc.collect()
+        torch.cuda.empty_cache()
+    try:
+        if "E" not in args.skip:
+            from mednest_jetson.measure import MemPoller, param_bytes
+            gc.collect()
+            torch.cuda.empty_cache()
+            with MemPoller() as mp:
+                ms = [AutoModelForCausalLM.from_pretrained(dirs[l], torch_dtype=dtype).to(args.device) for l in levels]
+            allres = sum(param_bytes(m) for m in ms)
+            del ms
+            gc.collect()
+            torch.cuda.empty_cache()
+            bits = torch.finfo(dtype).bits
+            e = el.ElasticModel.load(dirs[max(dirs)], [dirs[l] for l in sorted(dirs)], device=args.device, dtype=dtype)
+            e.build_all()
+            rec = {"kind": "memory", "levels": levels, "all_separate_resident_bytes": allres,
+                   "all_separate_peak_sys_mem_mb": mp.peak_mb, "sys_mem_before_mb": mp.start_mb,
+                   "elastic_resident_bytes": e.unique_param_bytes(),
+                   "all_9_separate_bytes_computed": sum(s.params for s in e.specs) * bits // 8}
+            w.write(rec)
+            print(f"  memory: elastic {rec['elastic_resident_bytes'] / 1e9:.2f} GB for {len(e.specs)} widths vs "
+                  f"{allres / 1e9:.2f} GB for {len(levels)} separate models resident "
+                  f"({rec['all_9_separate_bytes_computed'] / 1e9:.2f} GB for all {len(e.specs)})", flush=True)
+    except RuntimeError as exc:   # does not fit in the 8 GB shared memory: a result, not a crash
+        if "INTERNAL ASSERT" not in str(exc) and "out of memory" not in str(exc).lower():
+            raise
+        print("  [switch] step E: DOES NOT FIT in device memory", flush=True)
+        w.write({"kind": "oom", "step": "E", "error": str(exc)[:300]})
+        gc.collect()
+        torch.cuda.empty_cache()
     w.close()
 
 

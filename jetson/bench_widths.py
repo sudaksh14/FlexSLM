@@ -79,7 +79,7 @@ def run_block(w, args, target: dict, model, tokenizer, rows, idle_w, extra: dict
     gross = pw.get("energy_j")
     net = (gross - idle_w * pw["duration_s"]) if (gross is not None and idle_w is not None) else None
     summ = {
-        "kind": "summary", "target": target["name"], "fmt": target["fmt"], "max_new_tokens": target["max_new"],
+        "kind": "summary", "forced_length": wl.force_len(), "target": target["name"], "fmt": target["fmt"], "max_new_tokens": target["max_new"],
         **extra, "n": len(recs), "wall_s": wall_s, "decoder": args.decode, "prepare_ms": prepare_ms,
         "kv_cache_bytes": decoder.kv_bytes() if decoder is not None else None,
         "accuracy": wl.accuracy_by_source(recs),
@@ -122,6 +122,7 @@ def main():
     args = p.parse_args()
 
     import torch
+    import torch._dynamo  # noqa: F401  (import order: transformers' gemma modules fail on a circular import otherwise)
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from mednest_jetson import elastic as el
@@ -168,14 +169,42 @@ def main():
         if tok.pad_token is None:
             tok.pad_token = tok.eos_token if tok.eos_token is not None else "<|endoftext|>"
         remote = os.path.exists(os.path.join(spec["dir"], "modeling_qwen.py"))  # Apollo-1.8B (Qwen-1 code, reviewed)
-        m = AutoModelForCausalLM.from_pretrained(spec["dir"], torch_dtype=dtype, trust_remote_code=remote).to(args.device).eval()
+        try:
+            has_weights = any(f.endswith((".safetensors", ".bin")) for f in os.listdir(spec["dir"]))
+            if has_weights:
+                m = AutoModelForCausalLM.from_pretrained(spec["dir"], torch_dtype=dtype, trust_remote_code=remote).to(args.device).eval()
+            else:   # config-only dir: random weights, same shapes (shape-only latency/memory/energy)
+                from transformers import AutoConfig
+                torch.manual_seed(0)
+                cfg = AutoConfig.from_pretrained(spec["dir"], trust_remote_code=remote)
+                with torch.device("meta"):   # no fp32 copy: allocate the bf16 weights directly on the device
+                    m = AutoModelForCausalLM.from_config(cfg, torch_dtype=dtype, trust_remote_code=remote)
+                m = m.to_empty(device=args.device)
+                for mod in m.modules():
+                    if hasattr(mod, "reset_parameters"):
+                        mod.reset_parameters()
+                m.init_weights() if hasattr(m, "init_weights") else None
+                for mod in m.modules():     # buffers (RoPE inv_freq) are uninitialised after to_empty
+                    if type(mod).__name__.endswith("RotaryEmbedding"):
+                        mod.__init__(config=cfg, device=args.device)
+                m.eval()
+        except RuntimeError as exc:      # the model does not fit (8 GB shared CPU/GPU memory): a result, not a crash
+            if "INTERNAL ASSERT" not in str(exc) and "out of memory" not in str(exc).lower():
+                raise
+            print(f"  == {spec['name']}: DOES NOT FIT in device memory ({str(exc)[:80]})", flush=True)
+            w.write({"kind": "oom", "target": spec["name"], "dir": spec["dir"], "error": str(exc)[:300],
+                     "random_init": not has_weights})
+            m = tok = None
+            gc.collect()
+            torch.cuda.empty_cache()
+            continue
         sub = per_source_limit(rows, args.long_limit) if spec["max_new"] > 64 else rows
         dec = None
         if args.decode == "graph":
             lens = [wl.encode(tok, wl.prompt_for(r, spec["fmt"], tok), spec["fmt"], "cpu").shape[1] for r in sub]
             dec = DenseDecoders(m, max_len_for(lens, spec["max_new"]))
         run_block(w, args, spec, m, tok, sub, idle_w,
-                  {"level": None, "dir": spec["dir"], "params": sum(t.numel() for t in m.parameters()),
+                  {"level": None, "dir": spec["dir"], "random_init": not has_weights, "params": sum(t.numel() for t in m.parameters()),
                    "weight_bytes_resident": param_bytes(m), "weight_bytes_width": param_bytes(m)}, decoder=dec)
         del m, tok, dec
         gc.collect()

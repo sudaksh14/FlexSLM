@@ -203,7 +203,7 @@ max_seq 3072):
 | A5 | All levels per step vs one random level | `sft.paper.qwen3_0p6b_nested.single` |
 | B2 | MatFormer-style nested SFT baseline | `sft.paper.qwen3_0p6b_matformer` (run at the end) |
 | I1 | Independent pruned+FT 0.36B and 0.19B baselines | not started |
-| J1 | Jetson Orin Nano 15 W: latency, memory, energy, level switch time | not started |
+| J1 | Jetson Orin Nano 15 W: latency, memory, energy, level switch time | 0.6B shape-only sweep DONE (2026-11-19, random weights, 15 W only); Apollo-2B/Apollo2-2B do not fit in 8 GB; 1.7B pending |
 | S1 | 1.7B-backbone nested with bigger teacher | ON HOLD (teacher decision) |
 
 ## 7. Open questions for the user
@@ -1223,3 +1223,39 @@ max_seq 3072):
 - **DAS-6 back after the maintenance (15:48):** rebooted ~14:05, nodes 205-207 up (204 down since April), jobs survived: running
   28418 (Hydra Stage 2, node205), 28430 (lambda 0.3 Stage 1, node206), 28405 (0.6B reasoning curve, node207; it RESTARTED from
   scratch, was at 1600/2098 before).
+- **Jetson (2026-11-19): shape-only 15 W sweep of the 0.6B MedNest done; 2B Apollo baselines do not fit; 1.7B pending.**
+  * Board: IP changed to 10.113.206.56 (`~/.ssh/config` host `jetson` updated). Disk was 97% full: backed up four HF caches (clip-vit-large 4.8,
+    SmolLM2-1.7B 3.2, phi-2 2.6, TinyLlama 2.1 GB) as one tar + MobileLLaMA-1.4B as a second tar to
+    `C:\Users\skalra\Workspace\Matryoshka Learning\jetson_eval_harness\jetson_hf_cache_backup_2026-11-19*.tar` (size and listing verified), then deleted them
+    on the board (15 GB free; `apt clean` run by the user). Repo cloned to `~/FlexSLM` (commit a6a3ad2), venv `~/mednest-venv` made with `virtualenv`
+    (python3.10-venv needs sudo). Staged from the Hub: Qwen3-0.6B, Apollo-0.5B, Apollo2-0.5B (Apollo-2B / Apollo2-2B: config + tokenizer only).
+    DAS-6 was in maintenance, so no trained export was staged.
+  * **Decision (user): experiments without accuracy/performance measurement use random weights of the exact MedNest shapes, not checkpoints; 15 W only.**
+    New `jetson/make_random_export.py` (9-width grid of Qwen3-0.6B: hidden 512..1024, heads 8..16, kv 4..8, mlp 1536..3072; level 8 + anchors 0/4 with
+    weights, all levels with config + tokenizer), `jetson/run_shape_only.sh` (preflight, widths + dense baselines, switch cost; `BACKBONE=1p7b` for the 1.7B
+    shapes from `jetson/widths_qwen3_1p7b.json` = s1.qwen3_1p7b.full; `SKIP_2B=1`), `jetson/drop_file_cache.py`. Edits: `MEDNEST_FORCE_LEN=1`
+    (decode exactly max_new tokens, ignore EOS: `workload.eos_ids`), `bench_widths.py` (config-only dense models built on the GPU from the config,
+    OOM recorded as `kind: oom`, `import torch._dynamo` first because the Gemma modules fail on a circular import otherwise),
+    `bench_switch.py` (OOM per step recorded), `elastic.check_views` (skips levels without weights: the staged export only has weights for 0/4/8).
+    Not run on purpose: 7 W profile, 15 W <-> 7 W trace, subset accuracy (all need trained weights or the 7 W mode). Code changes are NOT committed.
+  * **Results** (15 W, 210 questions, forced 32 new tokens, bf16, graph decode; `jetson_logs_mednest/mednest-results/shape_only_full/`, backup in
+    `C:\Users\skalra\Workspace\jetson_logs_mednest`): decode ms/token and net J/answer by level 0..8 = 21.0/4.0, 22.3/4.4, 25.2/5.3, 28.0/6.3, 29.3/6.8,
+    30.8/7.3, 34.3/8.4, 37.5/9.5, 38.7/10.0 (params 188M..596M); TTFT 180-200 ms at every width. Same-shape dense baselines = nested widths within 1%
+    (conventional 38.7 ms/tok, indep-l0 20.7, indep-l1 29.4). Apollo-0.5B 24.7 ms/tok 3.5 J, Apollo2-0.5B 28.1 / 3.8 J. Switching: view 0.037 ms,
+    materialize ~749 ms (and 2x the memory), slice-load from the full file 0.75-1.1 s (warm cache only: no passwordless sudo for drop_caches).
+    Memory: all 9 widths as views 1.19 GB vs 6.77 GB for 9 separate models (3 separate: 2.30 GB).
+    **Caveat: `peak_sys_mem_mb` grows 5.0 -> 7.3 GB across the targets of one process (nothing is released between models); use weight bytes for the
+    paper's memory numbers, or one process per model.** The Qwen3-0.6B reasoning baseline has only 35 answers (5 per benchmark x 1,024 tokens, 456 J each);
+    its accuracy fields and all accuracy fields of this sweep are meaningless (random weights / forced length).
+  * **Apollo-2B / Apollo2-2B (config-only, random weights): DO NOT FIT in bf16 on the 8 GB Orin Nano (decision 2026-11-19: report them as "does not fit").**
+    After the user's reboot (first CUDA process, 6.7 GB free, 15 W, `jetson_logs_mednest/mednest-results/shape_only_2b_clean/`) both failed at weight
+    allocation with the CUDA allocator assert (`NVML_SUCCESS == r INTERNAL ASSERT`, which this Jetson torch build raises on OOM; recorded as `kind: oom`).
+    Apollo-2B = 2.51B params = 5.01 GB bf16, Apollo2-2B ~ 5.2 GB; the largest single allocation the board accepted was 5-5.5 GB. One earlier 6-question run of
+    Apollo-2B alone did complete (118 ms/tok, 16.4 J/answer, 321 ms TTFT) but could not be reproduced (4 later attempts, also after the reboot): treat as
+    borderline, do not report it as a measurement. About 0.9 GB shows as "used" with no process running after a CUDA process exits. Not tried: 8-bit/4-bit
+    (different protocol, needs a quantisation library on the board).
+    **Paper TODO (edit only at the end): the comparison table (paper/main.tex ~l.197-198) lists Apollo-2B and Apollo2-2B as accuracy baselines; in the Jetson
+    table give them "does not fit (5.0 / 5.2 GB bf16 > 8 GB shared memory)" in place of latency/energy.**
+  * **1.7B backbone (same protocol): prepared, started, cancelled by the user at 16:05 (to run later).** Estimate ~3 h (2.5-4 h). Command on the board:
+    `BACKBONE=1p7b MEDNEST_OUT=~/mednest-results/shape_only_1p7b bash jetson/run_shape_only.sh` (Qwen3-1.7B config + tokenizer staged; the random export
+    is rebuilt by the script). Expect OOM for the materialize step and the 3-resident-models step (full width is ~4 GB).

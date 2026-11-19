@@ -225,6 +225,8 @@ def check_views(elastic: ElasticModel, level_dirs: Dict[int, str], prompts: List
     from transformers import AutoModelForCausalLM
     out = []
     for level, d in sorted(level_dirs.items()):
+        if not any(f.endswith((".safetensors", ".bin")) for f in os.listdir(d)):
+            continue      # config-only level (the staged export keeps weights for the anchors only)
         dense = AutoModelForCausalLM.from_pretrained(d, torch_dtype=elastic.dtype).to(elastic.device).eval()
         view = elastic.width(level)
         diffs, agree = [], 0

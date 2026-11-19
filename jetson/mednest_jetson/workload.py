@@ -63,7 +63,15 @@ def score(row: dict, gen: str, fmt: str) -> Dict[str, object]:
     return {"correct": bool(is_correct(row, scored)), "boxed": last_boxed(scored)}
 
 
+def force_len() -> bool:
+    """MEDNEST_FORCE_LEN=1: decode exactly max_new tokens (ignore EOS). For shape-only runs with
+    random weights, whose answers are meaningless: latency/energy then depend only on the shapes."""
+    return os.environ.get("MEDNEST_FORCE_LEN", "0") == "1"
+
+
 def eos_ids(model, tokenizer) -> List[int]:
+    if force_len():
+        return []
     ids = model.generation_config.eos_token_id
     ids = list(ids) if isinstance(ids, (list, tuple)) else ([ids] if ids is not None else [])
     if tokenizer.eos_token_id is not None and tokenizer.eos_token_id not in ids:
