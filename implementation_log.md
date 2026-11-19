@@ -1259,3 +1259,11 @@ max_seq 3072):
   * **1.7B backbone (same protocol): prepared, started, cancelled by the user at 16:05 (to run later).** Estimate ~3 h (2.5-4 h). Command on the board:
     `BACKBONE=1p7b MEDNEST_OUT=~/mednest-results/shape_only_1p7b bash jetson/run_shape_only.sh` (Qwen3-1.7B config + tokenizer staged; the random export
     is rebuilt by the script). Expect OOM for the materialize step and the 3-resident-models step (full width is ~4 GB).
+
+- **Jetson (2026-11-19, evening): 1.7B shape-only sweep at 15 W finished (19:16 to 20:41 board time, ~85 min; faster than the 3 h estimate).**
+  * Results in `jetson_logs_mednest/mednest-results/shape_only_1p7b/` (copy verified: 4 files, same sizes) plus `shape_1p7b.out`.
+  * Decode ms/token by level 0..8 = 32.8, 36.4, 42.8, 49.3, 53.3, 58.2, 66.0, 73.5, 78.9 (params 508M..1.72B); median TTFT ~180-260 ms, mean 215-371 ms (long tail, max 3.8 s at level 6). Energy fields not yet tabulated here.
+  * Elastic view switch 0.049 ms mean (60 switches over levels 0/4/8). Full-width resident weights 3.44 GB (all 9 widths as views).
+  * **Does not fit (OOM, recorded as `kind: oom`):** the three same-shape dense baselines (conventional, indep-l0, indep-l1) next to the resident 3.4 GB model; switch steps B (materialize), C, D, E (several models resident). Report as "does not fit in 8 GB" for the 1.7B case, or rerun the dense baselines one process each (not done).
+  * Preflight: PASS with warnings for `check_views` at levels 4 and 8 (dense copy does not fit next to the resident model). Code fix (`check_env.py` reports skipped as warning, `elastic.check_views` catches OOM) is still uncommitted.
+  * Same caveat as 0.6B: `peak_sys_mem_mb` (6.7 to 7.6 GB) is unreliable across targets; use weight bytes.

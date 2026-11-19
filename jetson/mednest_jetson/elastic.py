@@ -227,7 +227,17 @@ def check_views(elastic: ElasticModel, level_dirs: Dict[int, str], prompts: List
     for level, d in sorted(level_dirs.items()):
         if not any(f.endswith((".safetensors", ".bin")) for f in os.listdir(d)):
             continue      # config-only level (the staged export keeps weights for the anchors only)
-        dense = AutoModelForCausalLM.from_pretrained(d, torch_dtype=elastic.dtype).to(elastic.device).eval()
+        try:
+            dense = AutoModelForCausalLM.from_pretrained(d, torch_dtype=elastic.dtype).to(elastic.device).eval()
+        except RuntimeError as exc:      # the dense copy does not fit next to the resident full model (8 GB shared)
+            if "INTERNAL ASSERT" not in str(exc) and "out of memory" not in str(exc).lower():
+                raise
+            out.append({"level": level, "skipped": "dense copy does not fit next to the resident model"})
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            continue
         view = elastic.width(level)
         diffs, agree = [], 0
         for p in prompts:

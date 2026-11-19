@@ -85,6 +85,10 @@ def main():
         prompts = [wl.prompt_for(r, "as_is") for r in rows[:args.check_prompts]]
         res = el.check_views(e, dirs, prompts, tok)
         for r in res:
+            if r.get("skipped"):      # not a failure: the comparison cannot be made on this board
+                check(f"view == exported level{r['level']}", False, r["skipped"], required=False)
+                w.write({"kind": "view_check", **r})
+                continue
             # bf16 matmuls on strided vs contiguous weights may differ in the last bits; the answer
             # (argmax) must not.
             check(f"view == exported level{r['level']}", r["argmax_agree"] == 1.0 and r["same_params"],
