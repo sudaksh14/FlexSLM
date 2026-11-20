@@ -20,17 +20,19 @@ from simulate import paired_ci, summarize
 
 
 def load(path):
-    setup, reqs, summ = None, defaultdict(list), {}
+    setup, reqs, summ, base = None, defaultdict(list), {}, []
     for l in open(path, encoding="utf8"):
         r = json.loads(l)
         k = r.get("kind")
-        if k == "setup":
+        if k == "load_baseline":
+            base.append(r)
+        elif k == "setup":
             setup = r
         elif k == "request":
             reqs[r["policy"]].append(r)
         elif k == "policy_summary":
             summ[r["policy"]] = r
-    return setup, reqs, summ
+    return setup, reqs, summ, base
 
 
 def main():
@@ -39,7 +41,7 @@ def main():
     ap.add_argument("--ref", default=None, help="policy name for the paired comparison (default: the first)")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
-    setup, reqs, _ = load(args.path)
+    setup, reqs, _, base = load(args.path)
     if not reqs:
         raise SystemExit("no request records")
     print(f"phases {setup['phases']}  score={setup['score']}  urgent {setup['urgent_ms']:.0f} ms  "
@@ -83,10 +85,28 @@ def main():
                 else:
                     ends.append((ph, round(r["rho"], 3)))
             print(f"  rho at the end of each phase ({name}): {ends}")
+    # energy per device phase: attributed (net of the phase baseline: idle, or idle + the co-running load) and
+    # net of idle only (includes the load's draw during the request); the true marginal lies between the two
+    if any(r.get("energy_net_idle_j") is not None for rs in reqs.values() for r in rs):
+        print("J/answer by device phase (attributed | net of idle only):")
+        for name, rs in reqs.items():
+            by_e = defaultdict(lambda: ([], []))
+            for r in rs:
+                a, b = by_e[r["phase"].split("@")[-1]]
+                a.append(r["energy_j"])
+                b.append(r["energy_net_idle_j"] if r.get("energy_net_idle_j") is not None else np.nan)
+            print(f"  {name:18s} " + "  ".join(f"{ph} {np.mean(a):.2f} | {np.nanmean(b):.2f}"
+                                               for ph, (a, b) in by_e.items()))
+            res[name]["energy_by_phase"] = {ph: {"attributed": float(np.mean(a)), "net_idle": float(np.nanmean(b))}
+                                            for ph, (a, b) in by_e.items()}
+    if base:
+        print("load baselines (W, idle %.2f):" % (base[0]["idle_power_w"] or float("nan")),
+              [(b["policy"], b["phase"], b["at"], None if b["power_w"] is None else round(b["power_w"], 2))
+               for b in base])
     out = args.out or os.path.join(os.path.dirname(os.path.abspath(__file__)), "out",
                                    "board." + os.path.basename(args.path).replace(".jsonl", ".json"))
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    json.dump({"setup": setup, "policies": {k: {kk: vv for kk, vv in v.items() if not kk.startswith("_")}
+    json.dump({"setup": setup, "load_baselines": base, "policies": {k: {kk: vv for kk, vv in v.items() if not kk.startswith("_")}
                                             for k, v in res.items()}}, open(out, "w"), indent=1, default=float)
     print("->", out)
 

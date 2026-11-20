@@ -114,6 +114,17 @@ def window_energy_j(trace, rail, t0, t1, wait_s=0.03):
     return e / 1000.0                                # mW * s -> J
 
 
+def baseline_power_w(trace, rail, seconds):
+    """Mean rail power (W) over the next `seconds` with no request running (None without rails)."""
+    if rail is None or seconds <= 0:
+        return None
+    t0 = time.monotonic()
+    time.sleep(seconds)
+    t1 = time.monotonic()
+    e = window_energy_j(trace, rail, t0, t1)
+    return None if e is None else e / (t1 - t0)
+
+
 def make_policy(spec, prof, levels, bundle, budget_energy):
     import numpy as np
     from policies import DeadlinePolicy, EnergyQueuePolicy, Fixed
@@ -160,6 +171,9 @@ def main():
     p.add_argument("--load-size", type=int, default=2048)
     p.add_argument("--load-cpus", type=int, default=4)
     p.add_argument("--idle-s", type=float, default=10.0)
+    p.add_argument("--load-baseline-s", type=float, default=5.0,
+                   help="s of rail sampling with the phase's load running and no request, at the start and end of "
+                        "each loaded phase; that power (not idle) is subtracted from the phase's requests")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--decode", default="graph", choices=["graph", "eager"])
     args = p.parse_args()
@@ -280,6 +294,16 @@ def main():
                         device.set_power_mode(mode, require=True)
                         cur_mode = mode
                     load = Load(load_kind, args.load_duty, args.load_size, args.load_cpus) if load_kind else None
+                    # Power subtracted from each request: idle, or (loaded phase) the board with the load running
+                    # and nothing else. The load slows down while a request shares the GPU, so this removes at
+                    # most the load's own draw: the attributed energy is a lower bound, idle-net an upper bound.
+                    base_w, base_src = idle_w, "idle"
+                    if load is not None:
+                        lb = baseline_power_w(ps.trace, rail, args.load_baseline_s)
+                        if lb is not None:
+                            base_w, base_src = lb, "load"
+                        w.write({"kind": "load_baseline", "policy": pol.name, "phase": f"{mode}+{load_kind}",
+                                 "at": "start", "power_w": lb, "idle_power_w": idle_w, "seconds": args.load_baseline_s})
                     try:
                         for _ in range(n):
                             r = reqs[i]
@@ -292,8 +316,10 @@ def main():
                             tb = time.monotonic()
                             lat = g["total_ms"] + sw
                             gross = window_energy_j(ps.trace, rail, ta, tb)
-                            if gross is not None and idle_w is not None:
-                                en, en_src = gross - idle_w * (tb - ta), "measured"
+                            en_idle = None
+                            if gross is not None and base_w is not None:
+                                en, en_src = gross - base_w * (tb - ta), "measured"
+                                en_idle = gross - idle_w * (tb - ta) if idle_w is not None else None
                             else:
                                 en, en_src = float(prof.energy_j(level, lat)), "model"
                             pol.observe(level, lat, en)
@@ -312,6 +338,8 @@ def main():
                                    "source": r["source"], "task": task, "phase": tag, "level": level,
                                    "deadline_ms": deadlines[i], "latency_ms": lat, "met": (deadlines[i] is None
                                    or lat <= deadlines[i]), "switch_ms": sw, "energy_j": en, "energy_src": en_src,
+                                   "energy_gross_j": gross, "energy_net_idle_j": en_idle,
+                                   "baseline_w": base_w, "baseline_src": base_src,
                                    "predicted_ms": float(prof.latency_ms(level, plen[i], n_pred)),
                                    "rho": pred.rho if pred is not None else None, "Q": getattr(pol, "Q", None),
                                    "correct": bool(ok), "cluster_correct": bool(cl_ok), "agree_cluster": agree,
@@ -320,6 +348,10 @@ def main():
                             recs.append((task, bool(ok), lat, en, level, deadlines[i], tag))
                             prev = level
                             i += 1
+                        if load is not None:         # drift check of the load's draw over the phase
+                            w.write({"kind": "load_baseline", "policy": pol.name, "phase": f"{mode}+{load_kind}",
+                                     "at": "end", "power_w": baseline_power_w(ps.trace, rail, args.load_baseline_s),
+                                     "idle_power_w": idle_w, "seconds": args.load_baseline_s})
                     finally:
                         if load is not None:
                             load.stop()
