@@ -224,15 +224,17 @@ def main():
     ap.add_argument("--urgent-level", type=int, default=8)
     ap.add_argument("--urgent-scale", type=float, default=1.0)
     ap.add_argument("--task-table", default="shrunk", choices=["raw", "shrunk", "scaled"])
+    ap.add_argument("--model", default=D.M3, help="samples name in data/samples (A2: D.A2G, levels 0/4/8)")
     args = ap.parse_args()
-    w = World(args.answer, args.seed, task_mode=args.task_table)
+    w = World(args.answer, args.seed, model=args.model, task_mode=args.task_table)
     if args.scenario == "budget":
         res = scenario_budget(w, args.n, args.seed, args.V)
     else:
         res = scenario_thermal(w, args.n, args.seed, args.slowdown, urgent_level=args.urgent_level,
                                urgent_scale=args.urgent_scale)
     os.makedirs(os.path.join(D.HERE, "out"), exist_ok=True)
-    out = os.path.join(D.HERE, "out", f"sim.{args.scenario}.{args.answer}.{args.task_table}.json")
+    out = os.path.join(D.HERE, "out", f"sim.{args.scenario}.{args.answer}.{args.task_table}"
+                       + ("" if args.model == D.M3 else "." + D.short_model(args.model)) + ".json")
     json.dump(res, open(out, "w"), indent=1)
     print("->", out)
 

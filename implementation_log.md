@@ -1271,3 +1271,222 @@ max_seq 3072):
   * **1.7B dense baselines, one process each (15 W, 210 questions, forced 32 tokens; `shape_only_1p7b/widths_15W_dense_*.jsonl`, backed up locally):** indep-l0-shape (508M) 32.3 ms/token, median TTFT 207 ms; indep-l1-shape (1.03B) 53.0 ms/token, TTFT 215 ms. These match the nested widths 0 and 4 (32.8, 53.3 ms/token), as on 0.6B. conventional-shape (level-8 shape, 1.72B, 3.44 GB) still does NOT FIT even alone (allocator assert); the elastic model of the same size did load, so the dense path (from_pretrained to CPU, then .to(cuda): two copies in shared memory) needs more peak memory than the elastic load. Not investigated further.
   * **1.7B conventional-shape (dense, 1.72B, 3.44 GB) investigation (2026-11-19, evening): borderline, not reproducible either way.** Memory traces (free -m every 2 s) show: after from_pretrained (CPU copy) + page cache of the 3.4 GB safetensors file, free memory is ~130-230 MB at the move to the GPU; the CUDA caching allocator on this Jetson torch raises the NVML assert instead of reclaiming page cache. Outcomes with identical settings varied: a foreground probe and a 6-question run loaded fine; the 210-question run failed at load (x3) and once at the static KV-cache allocation of the longest prompt bucket (load passed after adding `_evict_page_cache` in `bench_widths.py` before and after `.to(device)`). Result: report conventional-shape (level-8 shape) as "does not fit / borderline in 8 GB" unless a direct-to-GPU loader (no CPU copy; accelerate is not installed) is written. Latency of that width is already given by the nested level 8 (78.9 ms/token); the l0/l1 dense baselines match nested widths within ~1.5%.
   * **1.7B conventional-shape, final (user decision 2026-11-19): "does not fit" for the 210-question run; the 6-question probe is reported as a reduced-sample reading.** The public HF Qwen3-1.7B checkpoint (`~/mednest/models/Qwen3-1.7B`, 4.06 GB with a separate lm_head) also failed at load (allocator assert), so it brings no improvement. Two independent 6-question probes of the level-8-shape dense model (random weights, 15 W, forced 32 tokens, `jetson_logs_mednest/mednest-results/probe_conv/widths_probe.jsonl`, `widths_probe2_20261119_221828.jsonl`): 77.0 and 76.9 ms/token, median TTFT 256 and 251 ms, net 20.9 J/answer (gross 31.1 J), 3.44 GB weights. Compare nested level 8: 78.9 ms/token (n=210). Mark as n=6 wherever used.
+- **Controller ideation (user question, 2026-11-19; discussion only, no code):** proposed a two-tier controller. (1) Deploy-time selector:
+  device profile (memory, power mode, backend) -> feasible widths -> pick 1-2 "anchor" widths; a compiled backend (delta file / per-level
+  HF export -> dense -> GGUF/TensorRT) has fixed shapes, so it is chosen here, not per request. (2) Runtime per-request controller over
+  in-process views (0.037 ms switch): widest width whose predicted latency (existing `elastic` predictor x a feedback correction from
+  observed latency, for thermal/contention) meets the deadline, plus an energy virtual queue (drift-plus-penalty) for a battery budget.
+  Observation from M3 (28230) + Jetson 15 W: on the (ms/token, accuracy) plane the upper convex hull is only L0 / L7 / L8, so an
+  average-budget controller time-shares those; intermediate widths only matter for hard per-request deadlines. Confidence/router
+  controllers need the oracle bound from per-question correctness at all 9 widths first (not computed). Risk to check: int4 llama.cpp
+  of the full 0.6B may beat bf16 L0 in PyTorch; compare widths on the same backend.
+
+### 2026-11-20
+- **Results check (DAS-6 + hipster, 14:30).** ssh works again via `~/.ssh/agent.sock` in Git Bash (`export SSH_AUTH_SOCK=~/.ssh/agent.sock`);
+  the Windows ssh-agent service is disabled. DAS-6 has no Slurm accounting (`sacct` disabled): read `jobs/*.out` instead.
+- **Finished (all queued 2026-11-19 DAS-6 jobs except the lambda 0.5 tail and two failures).** PMC ppl L0 / L4 / L8 (Stage 1 continuum):
+  Hydra lambda 0.1 (28417) 15.24 / 10.13 / 7.85; plain lambda 0.1 (28424) 12.34 / 9.02 / 7.18; lambda 0.3 (28431) 12.20 / 8.93 / 7.12;
+  lambda 0.5 (28438) 12.17 / 8.90 / 7.10. Plain beats Hydra at every width; larger lambda lowers ppl slightly (0.05-0.2).
+  Stage 2 val answer-token acc L0 -> L8: final-recipe pilot 0.826 -> 0.853; lambda 0.1 0.826 -> 0.854; lambda 0.3 0.827 -> 0.852 (flat across lambda).
+  32-token evals L0 -> L8 (acc %): pilot medqa 25.8 -> 37.4, medmcqa 32.2 -> 38.7, head_qa 24.7 -> 44.9, medbulltes 20.1 -> 28.9;
+  Hydra medqa 28.4 -> 37.3, medmcqa 31.8 -> 38.0; lambda 0.1 medqa 26.3 -> 37.9; lambda 0.3 medqa 26.7 -> 37.3, medmcqa 31.9 -> 39.6, medbulltes 18.8 -> 31.2.
+  Lambda differences are mostly within the +-1-2.6 CI. Not all 9 levels of the pilot (28409-15) were read.
+- **Running:** 28439 (lambda 0.5 Stage 2, node205, 67% at 14:33); 28440 export, 28441-43 evals depend on it.
+- **Failures and fixes:** 28405 (0.6B think curve, node207 A10 22 GB) CUDA OOM at question 2016/2098 (bs 32, 4096 tokens) -> resubmitted as
+  **28459** on node206 (A40), bs 32, 12 h. 28444 (rescore of the 1.7B curve) `No module named 'eval'`: `python -I` ignores the cwd;
+  resubmitted as **28458** (fatq node202, `python -m`, no `-I`); `queue_2026-11-19.sh` fixed locally (not synced). ids in jobs/queue_2026-11-20.ids.
+- **Hipster:** nothing started. 398292 / 398293 (smokes) PENDING (Priority); 7 trainings + exports + evals on Dependency.
+  Only pytest 398150 / 398291 completed.
+
+### 2026-11-20
+- **Width controller built in `controller/` (separate from the pipeline; imports nothing from it; numpy only, runs locally;
+  not committed).** Inputs are copies (gitignored `controller/data/`): M3 samples levels 0-8 + conventional from DAS-6 results,
+  Jetson 0.6B 15 W shape-only `widths_15W.jsonl` / `switch.jsonl`. Tier 1 `deploy.py` (views vs compiled anchors), tier 2
+  `policies.py` (Fixed, DeadlinePolicy +/- latency feedback, EnergyQueuePolicy = drift-plus-penalty, task-aware with shrunk
+  per-set tables), `offline.py` (Pareto / hull / oracle), `simulate.py` (budget, thermal), `test_controller.py` (6 pass).
+  Calibration/evaluation split of the test questions (seed 0): controller statistics never see the scored half.
+  Energy model reproduces the measured J/answer (L0 4.02 / L8 9.97 vs 4.0 / 10.0).
+- **Results (simulation, not a device run; see controller/README.md):** hull {L0, L7, L8}; energy queue beats the best fixed width
+  within the same budget by +2.3 to +3.6 macro points (paired bootstrap CIs exclude 0, 6,423 questions); task-aware over agnostic
+  +0.5..1.2 (significant only at the lowest budget). Latency feedback under a x1.3 slowdown: urgent misses 100% -> 49% (eos
+  answers; floor 46%) / -> 22.5% (32-token answers), accuracy -0.3 n.s. Oracle router 50.3 is mostly not deployable (correlated
+  errors + lucky guesses; needs a confidence signal not stored in samples files).
+- Next (not done): Jetson runner for policies.py with trained weights + real 15 W <-> 7 W switches; GGUF/TensorRT profiles of 2-3
+  widths and of int4 full; rerun on the `final9` Stage-2 evals when they land. `scripts/das6/queue_2026-11-19.sh` shows as
+  modified in git; not touched by this session.
+- **Jetson runner for the controller written (2026-11-20, not run yet; not committed):** `controller/jetson_runner.py` (board;
+  imports jetson/mednest_jetson + nestbench read-only: ElasticModel views, ElasticDecoders, PowerSampler, set_power_mode),
+  `controller/run_jetson.sh` (QUICK=1 smoke / full 630 x 6 policies), `controller/make_bundle.py` -> tracked
+  `controller/bundles/{paper.qwen3_0p6b_nested.n630.s0.json, smoke.json, profile.0p6b.15W.jsonl}` (stratified 90 per test set from
+  the evaluation half; calibration-half tables), `controller/analyze_board.py`, `controller/das6_dryrun.sbatch` (node207, trained M3,
+  no rails). Per-request energy = VDD_IN integrated over the request window minus idle floor; the policy observes measured
+  latency/energy. Default `--score cluster`: random-weight export on the board decodes the cluster's per-width answer length, correctness
+  from the cluster (no checkpoint on the board); `--score device` with the trained export. Default disturbance = co-running CUDA load
+  (`15W:210,15W+gpu:210,15W:210`); 7 W phases possible via PHASES (needs passwordless nvpmodel; 7 W was not used so far by decision).
+  Tests: 7 pass locally (incl. window energy + phase parsing); analyze_board checked on a synthetic log. **DAS-6 dry run NOT submitted:
+  fs2.das6 ssh timed out (2026-11-20 afternoon).** Next: sync + `sbatch controller/das6_dryrun.sbatch`, then the board.
+- **Controller DAS-6 dry run 28462 (node207 A10, trained M3, smoke bundle 42 req, keep/keep+gpu/keep, no rails) PASSED (~3.5 min).**
+  7 unit tests ok; all three runs (score cluster 6 policies, score device 2 policies, no-deadlines 2 policies) + analyze_board
+  completed; outputs `/var/scratch/skalra/flexslm/controller_dryrun/28462/`. Mechanics only (A10 is ~4x faster than the Jetson
+  profile: measured/predicted 0.23, with GPU load 0.29 = +24%, so the load phase works). Open-loop `deadline` dropped widths it did
+  not need (35/42 at L8, acc 23.8); `deadline+fb` learned rho ~0.25 and stayed at L8 (26.2), the intended feedback effect.
+  Energy = profile model (no rails). Device scoring: accuracy at L8 = cluster (26.2) but answer agreement 36/42 (85.7%): A10 vs A40,
+  graph/static-cache decoding vs HF generate, near-chance model with small margins; check agreement on the board.
+  Note: the queue's warm-start backlog assumes the budget binds; where the device is far below budget (this A10) it under-spends
+  for ~40 requests (queue:0.5 stayed at L7). On the board the budget is from the same 15 W profile, so it binds.
+- **Full 7-benchmark averages, Stage-1 lambda pilots (32-token evals, mean of the 7 sets / mean w/o MedCalc / pooled over 12,797 q; computed 2026-11-20 from results/gen.*final9*-level{0,8}.t32.json):**
+  L8: CE-only Stage 1 (pilot final9) 29.8 / 30.0 / 32.2; KD 0.1 29.2 / 29.6 / 31.7; KD 0.1 Hydra 28.9 / 29.5 / 31.5; KD 0.3 29.7 / 30.2 / 32.2; KD 0.5 30.0 / 30.4 / 32.5.
+  L0: 21.1 / 21.3 / 21.3 (hydra) / 21.2 / 21.4 (avg), all at the guess rate. Differences <= 1.1 avg (pooled SE ~0.4): no resolvable winner; KD 0.5 nominally
+  best, not better than CE-only Stage 1 beyond noise. Hydra sampling is nominally worst.
+- **Correction (2026-11-20):** the Stage-2 teacher / 1.7B baseline is the UNCLIPPED E_A export (avg 36.8); 30.6 was the clipped T1 (reference only).
+- **8B teacher cost estimate (extrapolation, nothing run):** 1.7B full FT = 3.0 h for 1 epoch on 2 x A40 (28131, 41.7 GB peak). 8B full FT needs ZeRO-3 / 8 GPUs
+  (hipster performance); LoRA fits 2 x A40. See chat for numbers.
+- **HuatuoGPT-o1-7B LoRA teacher: prepared, NOT run (2026-11-20, user request).** Files (uncommitted, synced to hipster ~/FlexSLM-medbench):
+  `training/finetune_teacher_lora.py`, `scripts/hipster/teacher_lora.sbatch`, `test/test_teacher_lora.py` (4 tests, hipster pytest 398907 PASSED, tiny Qwen2 on CPU).
+  * Design: standalone peft + torchrun DDP (no LoRA existed in the repo; the Stage-2 teacher only needs an HF dir). Data = data/medmix_sft through
+    `training.sft.QADataset/collate_qa` with the Qwen3 tokenizer (KD needs identical ids), CE on answer tokens only, LM head applied to the answer positions
+    only (no [B,S,152k] logits). LoRA r 64 / alpha 128 / dropout 0.05 on q,k,v,o,gate,up,down; lr 1e-4, 3% warmup + cosine, global batch 32, 1 epoch
+    (~1,043 steps), max_seq 3072, bf16 + activation checkpointing, no grad clipping (repo's Stage-2 finding; grad_norm logged). Not chosen by experiment.
+  * Export: merge adapter, trim embedding + lm_head from 152,064 to 151,936 rows (trainer.py softmaxes teacher logits as [.., student_vocab]), save with the
+    Qwen3 tokenizer to `hf_export/medmix_huatuogpt_o1_7b_lora`; safetensors header check of the shapes. Final adapter also copied to ~/flexslm_saves/teacher_lora/<job>.
+  * Known risk, logged at startup: Huatuo has no `<think>`/`</think>` embeddings (ids 151667/8 are untrained padding rows) but the Stage-2 prompt ends with
+    `<think>\n\n</think>\n\n`; LoRA does not train embeddings. Check the printed row norms and the teacher's val answer-token acc / 7-benchmark eval.
+  * Smoke (not submitted): `sbatch --gres=gpu:rtx_6000_ada:2 --cpus-per-task=64 --time=01:30:00 --export=ALL,SMOKE_STEPS=20 scripts/hipster/teacher_lora.sbatch`
+    (longest sequences first, memory + throughput + projected full-run time, merge/save/verify into scratch then deleted; also downloads ~15 GB into the home HF cache,
+    home had 72 GB free). Full run: `sbatch scripts/hipster/teacher_lora.sbatch` (4 x RTX 6000 Ada, --time 10 h placeholder; set from the smoke projection).
+  * Still needed before it can be a Stage-2 teacher: eval of the merged teacher (32-token, 7 sets), and a Stage-2 config with `teacher_hf_model` pointing to it
+    (7B bf16 teacher + student on one A40 will not fit at the current micro-batch; hipster 48 GB or a smaller micro-batch).
+- **Student final report read (2026-11-20, `paper/student_results/ReportErasmus_1.docx`; job logs `Nextcloud/FlexSLM/repo/jobs`, checkpoints
+  `Nextcloud/FlexSLM/saved_models`, student code github berraylvc/flexSlm_uva, evals ran on Snellius, not DAS-6).** Spot-checked logs match the report
+  (evalgen60k L9/L5, evalgenKVT L9/L5). New 1.7B results, same 32-token protocol, 12,797 q, KD 0.5 T2 all tokens from the SAME-SIZE fine-tuned 1.7B
+  ("SFT teacher", student's eval 37.9; our E_A 36.8): 10 levels 244M..1,721M, SHARD sampling (largest + smallest + 1 random middle), Minitron
+  reordering + kv_group (= our GQA-preserving slicing). avg7 L0 / L5 (~900M) / L9: run 4 (SFT teacher, reorder + kv_group, 10k cap) 19.8 / 23.1 / 39.3
+  (`..._10L_kv_teacher.pt`); run 6 (+60k MedMCQA) 19.9 / 23.9 / 40.2 (gain only on MedMCQA, in-distribution; breaks FaithMed's 10k cap);
+  progressive teacher (run 3) worse at L9 (37.6); head reordering (run 5) n.s. 3-level old-mapping run: full 40.0 vs teacher 37.9 (+1.8 pooled
+  p<1e-4) = born-again effect. Only L0/L5/L9 were evaluated (L1-L4, L6-L8 not).
+- **Also landed:** 28458 rescore of Qwen3-1.7B thinking curve (300/set): budget 512 0.2, 1024 8.8, 2048 26.4, **4096 38.5 (mean 2,308 generated
+  tokens)** = FaithMed's reported 38.3 for the untrained 1.7B (reproduced). 28439-43 KD 0.5 lambda arm L0/L4/L8 evals done (see entry above). 28459
+  (0.6B curve) running on node206. Hipster: nothing started; smokes 398292/398293 still PENDING (Priority) since 2026-11-19, all 7 trainings on
+  Dependency. DAS-6 node205 and node207 idle at ~19:00.
+- **Assessment given to the user (no runs submitted):** no 7-8B teacher needed (Stage-1 KD sweep gave no resolvable gain = the user's own gate for it
+  is not met; narrow widths are capacity-limited, which a bigger teacher does not fix; same-size fine-tuned teacher already lifts the 1.7B full width
+  above conventional FT). Proposed minimal remaining set: (1) 1.7B MedNest in our code with KD from the same-size E_A teacher (needs the user to
+  relax the "teacher bigger than the full width" rule for 1.7B), or adopt student run 4 as the 1.7B row; (2) eval all 10 levels of student run 4 (knee
+  of the 1.7B curve); (3) independent full width WITH KD (indep_l2) + no_kd: move from hipster to idle DAS-6; (4) 0.6B curve 28459 + MedNest on the
+  same 300/set subset. Key weakness: 1.7B ~900M width (23.1-23.9) < 0.6B MedNest full width (30.5 at 596M).
+
+### 2026-11-20 controller committed; Jetson not reachable
+- Commit 24fc7fe adds `controller/` (16 files; `data/`, `out/` gitignored; README updated with dry run 28462).
+- Board run not started: `ssh jetson` (192.168.0.101) gives no ping and no port 22 while the laptop is on
+  192.168.0.106 (board off/asleep or a new DHCP address). When it is up: update ~/FlexSLM on the board, then
+  `QUICK=1 bash controller/run_jetson.sh && bash controller/run_jetson.sh` in tmux.
+
+### 2026-11-20 evening: controller on the Jetson (board back up, 192.168.0.101)
+- Board disk was 98% (1.3 GB free). User asked to delete saved models no longer needed: deleted `~/mednest/models/mednest-random-1p7b`
+  (6.2 GB; rebuilt by `BACKBONE=1p7b jetson/run_shape_only.sh`) and the weight files of Qwen3-1.7B, Apollo-0.5B, Apollo2-0.5B (Hub, re-downloadable;
+  their measurements are done). Config + tokenizer kept (config-only runs), `WEIGHTS_DELETED.txt` in each. Kept Qwen3-0.6B (source for
+  `--random-from`), Apollo-2B/Apollo2-2B (config only). Now 15 GB free.
+- Board repo `~/FlexSLM` stays at a6a3ad2 with uncommitted jetson edits (same content as the laptop's up to CRLF, checked by md5);
+  `controller/` copied over with tar (no git pull).
+- New `jetson_runner.py --random-from <base dir>`: random seeded weights built in GPU memory, no export on disk; `run_jetson.sh` falls back to it.
+- Smoke (`~/mednest-results/controller_smoke`, copy in `jetson_logs_mednest/mednest-results/controller_smoke/`): 42 requests, 15 W,
+  rails measured (idle 3.86 W). measured/predicted latency 1.11 at 15 W, 1.49 with the GPU load; deadline+fb rho 1.25 -> 1.48 -> 1.16.
+  fixed:L8 26.2 acc 3.48 J 23.8% miss; deadline+fb 26.2 3.05 J 9.5%; queue-task:0.5 23.8 2.08 J 4.8%.
+  Caveat: per-request net energy in the +gpu phase includes the load generator's power (window integral of VDD_IN minus idle).
+- Full run started 18:58 board time in tmux `ctrl`, out `~/mednest-results/controller_full`.
+- **Energy attribution fix (load phases), 2026-11-20:** `jetson_runner.py` now measures a load baseline (`--load-baseline-s 5`: board power with
+  the phase's load running and no request) at the start and end of each loaded phase (`kind: load_baseline` records) and subtracts it, not idle,
+  from that phase's requests; the policies observe this attributed energy. Records also keep `energy_gross_j`, `energy_net_idle_j`
+  (old definition), `baseline_w`, `baseline_src`. Bounds: the load slows while sharing the GPU, so attributed = lower bound, idle-net = upper
+  bound of the inference's marginal energy. `analyze_board.py` prints J/answer per phase in both definitions and the baselines.
+  The full run started 18:58 uses the OLD code: its +gpu-phase energy and the queue policies' choices there include the load's power; latency,
+  misses and rho are unaffected. Board went off the network again (~19:1x) before the fix could be copied. To do when it is back: copy
+  `controller/` (tar), QUICK=1 smoke to check the baselines, then rerun the full run.
+- **User decisions (2026-11-20, evening):** (1) 1.7B teacher = the SAME-SIZE conventionally fine-tuned Qwen3-1.7B (E_A); the
+  "teacher bigger than the full width" rule is relaxed for the 1.7B backbone (born-again distillation). (2) Items 1-2 on DAS-6,
+  item 3 (Stage-2-only ablations, indep, 1.7B CE-only) stays on hipster only, not urgent. (3) Paper updated now with all results.
+- **Item 1, 1.7B MedNest with KD (`sft.paper.qwen3_1p7b_nested.no_stage1.kd`, new in training/sft.py; = A2 on Qwen3-1.7B, 3 widths
+  0.5/0.75/1.0, Minitron order, KD 0.5 T2 from E_A).** Smoke 28463 OOM at micro-batch 4 (KL of the longest batch, 44.1 / 44.7 GB) ->
+  micro-batch 2; chain 28464-28468 cancelled. **Resubmitted: smoke 28469 -> train 28470 (node205, 40 h limit) -> export 28471
+  (fatq node202; node201 is another user's) -> evals L0-L2 28472-28474** (jobs/queue_2026-11-20.ids). 27 local tests pass.
+- **Item 2, all 10 widths of the intern's run 4 (`sft.medmix_qwen3_1p7b_10L_kv_teacher`):** her code cloned to
+  `/var/scratch/skalra/flexslm_student/code` @1e5fdfa (her exporter repeats kv heads per query head for HF, e.g. L0 5q/3kv -> 253M
+  exported); warm-start dir `code/hf_export/qwen3_1p7b_reordered` = Qwen3-1.7B config + tokenizer only (export needs nothing else);
+  checkpoint uploading to `flexslm_student/home/FlexSLM/saved_models/` (her code reads $HOME/FlexSLM/saved_models; HOME is
+  overridden for her python only). New `scripts/das6/export_student.sbatch` (fatq node202) -> `hf_export/student__<config>/level0-9`,
+  then OUR evalgen.sbatch. Not submitted yet (upload in progress).
+- **Head reordering (user question):** our ordering always includes KV groups (heads move with their query heads) together with MLP
+  and hidden channels; its downstream effect was nil (A1 no-order 28258: L8 28.5 vs 27.2 ordered, p 0.14; only Stage-1 ppl improved).
+  The intern's run 4 ordered hidden + MLP only; run 5 added head ordering (in GQA groups): +0.5 / +0.2 / -0.5 (n.s. / n.s. / p 0.038).
+  What matters is the GQA pairing (kv_group), not head order. Stage-2-only no_order ablation still pending on hipster.
+- **New numbers used in the paper:** MedNest 596M (A2 L2) on the 300-per-set subset (2,098 q) = **31.5** (full set 30.5); Qwen3-1.7B
+  reasoning on the subset: mean prompt 296 tokens, mean generated 2,308, avg 38.46. GFLOPs/question = 2 x params x (296 + gen):
+  1.7B budgets 1,024 / 2,048 / 4,096 = 4,444 / 6,894 / 8,958; MedNest 596M <= 391, 1.72B <= 1,128. Jetson 0.6B table from
+  `jetson/aggregate.py` on shape_only_full (medians): L0/L4/L8 TTFT 188/195/197 ms, 21.0/29.3/38.7 ms/token, answer 0.84/1.10/1.40 s,
+  4.0/6.7/10.0 J; dense same-shape within 1%; Apollo-0.5B / Apollo2-0.5B 24.7 / 28.1 ms/token (16-token answers, 3.5 / 3.8 J);
+  Qwen3-0.6B reasoning 68.1 s, 456 J (n=35); switch view 0.039 ms median, TTFT after switch 135 vs 134 ms; separate-model load
+  0.47-0.82 s warm (first loads 5.1 / 9.3 s), slice-load 0.75-1.08 s, materialize 0.53 s; memory 1.19 / 2.30 / 6.77 GB.
+- **Paper updated (backup `paper/main_backup_2026-11-20.tex`, `references_backup_2026-11-20.bib`; PDF rebuilt, 15 pages, no errors):**
+  abstract (1.7B sentence, Jetson numbers), teacher rule (same-size teacher for 1.7B, + furlanello2018born in bib), 1.7B params
+  0.51/1.03/1.72B, Table qwen17 + ten-width rows (run 4) and the intern's conventional FT 37.9 (marked "independent
+  implementation"), FaithMed table/text (1.7B curve, MedNest subset 31.5, FLOPs, Jetson 3-minute answer), ablations (GQA pairing,
+  head ordering, progressive teacher), new Sect. 5.4 + Table jetson, limitations (useful widths near full size), conclusion.
+  Fixed a pre-existing `\` -> `\` in the ablation table. Remaining red: 1.7B 3-width rows, Qwen3-0.6B reasoning row, independent
+  and ablation rows, Separate-shape accuracies, subset number of MedNest 1.7B.
+- **Rerun with the fix, 2026-11-20 19:20-19:30 (board back):** the old full run (18:58, old energy code) was stopped at 2,520 / 3,780 requests (4 of 6
+  policies; queue policies not yet run) -> `~/mednest-results/controller_full_oldenergy`. First fix (subtract the load's standalone power, measured
+  at phase start) gave far-apart bounds on the smoke run (L8 in +gpu: 1.81 vs 4.27 J; clean 3.10) and the load's power drifted 8.1 -> 10.4 W over
+  a 14-request phase (GPU clocks rising) -> smoke kept as `controller_smoke_loadbase`, the just-started full run aborted (`controller_full_aborted_loadbase`).
+- **Final attribution (`load_ops`):** the GPU load counts finished matmuls in a /dev/shm counter; baseline windows (load alone, 5 s at phase start
+  and end) give J per op = (P_load - P_idle) / ops rate; each request is charged gross - idle*dt - J_per_op * (load ops during the request).
+  Bounds kept per request: `energy_net_loadpower_j` (lower), `energy_net_idle_j` (upper). Smoke (`controller_smoke`): J/op 30.3-32.9 mJ at
+  start/end while the power drifted 8.1 -> 10.4 W (ops 137 -> 198/s), i.e. the per-op cost is stable; attributed J/answer in +gpu vs clean 15W:
+  fixed:L8 2.86 vs 3.09 [bounds 1.81, 4.30], deadline+fb 2.54 vs 2.71, queue-task:0.5 1.80 vs 1.78. measured/predicted latency 1.09 / 1.44.
+- Full run with this code started right after the smoke in tmux `ctrl` (~19:31), out `~/mednest-results/controller_full`. Copies of all smoke
+  dirs and the old full run in `jetson_logs_mednest/mednest-results/`.
+- **User (2026-11-20, late): item 1 dropped. The 1.7B result is the intern's run 4 checkpoint (`..._10L_kv_teacher.pt`); no rerun in
+  our code.** Smoke 28469 (micro-batch 2) had also run out of memory (37 GB static after step 1: fp32 weights + grads + AdamW + bf16
+  teacher; she trained on 80 GB H100s); the ZeRO-1 resubmission (smoke 28475 -> 28476 -> 28477 -> 28478-28480) was cancelled
+  before it ran. Config `sft.paper.qwen3_1p7b_nested.no_stage1.kd` (micro-batch 2 + zero_optimizer) stays in training/sft.py, unused.
+- **Item 2 upload:** scp from the laptop failed (Nextcloud online-only placeholder: "Permission denied" on read; DAS-6 connection
+  reset). The user downloads the checkpoint on DAS-6 directly from SURFdrive WebDAV (curl, WebDAV app password, in tmux) to
+  `/var/scratch/skalra/flexslm_student/home/FlexSLM/saved_models/`; expected size 7,763,415,647 bytes. Then submit
+  `sbatch scripts/das6/export_student.sbatch sft.medmix_qwen3_1p7b_10L_kv_teacher` + evalgen of
+  `hf_export/student__sft.medmix_qwen3_1p7b_10L_kv_teacher/level0..9` (afterok).
+- **Paper:** the empty 3-width 1.7B rows are removed; Table qwen17 now presents run 4 as MedNest (1.72B / 0.90B / 0.24B) with the
+  recipe differences in the text (ten widths, sandwich sampling, hidden + FFN ordering, same-size teacher 37.9 = "second
+  conventional FT run" row) + a red row for the other seven widths; method gives the ten widths 0.24B-1.72B. PDF rebuilt (15 pages).
+- **Item 2 submitted (2026-11-20 ~19:47).** Public SURFdrive link of the user's `saved_models` folder (download permission; two earlier links were
+  file drops) fetched over public WebDAV on a fatq job: download **28481** (node202, curl resumable, size check 7,763,415,647) -> export
+  **28482** (`scripts/das6/export_student.sbatch sft.medmix_qwen3_1p7b_10L_kv_teacher`, intern's code @1e5fdfa) -> evals L0..L9
+  **28483-28492** (our evalgen.sbatch, 32 tokens; node207 only, ~15 min each). Exports in
+  `/var/scratch/skalra/flexslm/hf_export/student__sft.medmix_qwen3_1p7b_10L_kv_teacher/level0-9`.
+- **Full run 19:31-20:05 (load_ops code) INVALID for 4 of 6 policies** -> kept as `controller_full_noload` (board and local copy). The GPU load
+  process died at start-up with CUDA out of memory (NvMap error 12, ~1 GB for its CUDA context next to the resident model + 9 decoders sized for
+  the longest of 630 prompts; the 42-request smoke has shorter buffers and was fine). `Load` only checked liveness after 3 s, so fixed:L0,
+  deadline, deadline+fb ran their "+gpu" phase without load (0 ops/s, 4.3-4.5 W baselines); queue:0.5 got the load only late in the phase.
+  fixed:L8 and queue-task:0.5 had it. Fix: `Load` empties the caching allocator, waits (<= 60 s) until the load has finished >= 10 matmuls,
+  retries 3x, otherwise aborts; a load that exits mid-phase aborts the run; `analyze_board.py` warns about loaded-phase requests without load work.
+  Full rerun started 20:07 in tmux `ctrl` -> `~/mednest-results/controller_full`.
+- **A2 (paper main model, 3 widths) in the controller (user, 2026-11-20 ~20:30):** samples copied from DAS-6
+  (`gen.hf_export-flexllama__sft.paper.qwen3_0p6b_nested.no_stage1-level{0,1,2}`; DAS-6 ssh needs `SSH_AUTH_SOCK=~/.ssh/agent.sock`) and
+  stored a second time as `..._grid048-level{0,4,8}` (A2 levels 0/1/2 = grid shapes 0/4/8, so the 9-level Jetson profile applies).
+  `data_io.A2G`, `simulate.py --model`. Offline (eos): A2 L0/L4/L8 = 20.8/22.7/30.5 at 1.23/1.81/2.49 J; hull {L0, L8}, L4 2.57 points
+  below the L0/L8 mix; oracle 45.8 (55.7 if independent). Budget sim: task-aware queue - best fixed within budget = +3.3 [2.7, 4.0] (1.43 J),
+  +4.3, +4.9, +6.9, +7.0 [5.3, 8.9] (2.26 J); task-aware - agnostic +1.9 [1.3, 2.5] at 1.43 J, +1.6 [0.8, 2.3] at 2.05 J, n.s. elsewhere;
+  the queue time-shares L0/L8 and almost never uses L4. Thermal x1.3: urgent-slow misses 98.5% open loop -> 48.6% with feedback
+  (floor: L0 45.4%), overall 14.8% -> 9.1%, accuracy -0.47 [-0.97, +0.02]. Outputs `controller/out/*A2*`.
+  Board: bundle `paper.qwen3_0p6b_nested.no_stage1.A2.n630.s0.json` (levels 0/4/8); A2 full run queued behind the M3 rerun
+  (tmux `ctrlA2`, `~/run_A2_after.sh` waits for runner PID 7044) -> `~/mednest-results/controller_full_A2`.
+- **Board results 2026-11-20 (valid; all loads ran, J/op 30.6-32.8 mJ, no warnings)** — M3 rerun `controller_full` (20:07-20:40) and A2
+  `controller_full_A2` (20:41-21:13), 630 requests x 6 policies, copies in `jetson_logs_mednest/mednest-results/`. A2 / M3 acc, J, miss:
+  fixed full 30.8/3.04/28.1 | 25.7/3.05/26.3; fixed narrowest 20.3/1.25/7.1 | 19.8/1.27/4.4; deadline 30.0/2.68/20.8 | 24.9/2.75/21.9;
+  deadline+fb 28.6/2.48/11.0 | 24.0/2.49/14.9; queue:0.5 24.1/1.78/6.7 | 23.3/1.78/6.8; queue-task:0.5 25.4/1.78/5.4 | 21.9/1.78/5.2.
+  Feedback - open loop: misses -9.8 [-12.5, -7.6] (A2), -7.0 [-9.5, -4.4] (M3); urgent misses under load 95 -> 30 % (A2), 98 -> 28 % (M3);
+  acc -1.4 [-3.0, +0.04], -0.95 [-2.5, +0.6]. Queues vs fixed narrowest (only width within 1.78 J): A2 +3.8 [0.9, 6.7] / task +5.1 [1.9, 8.2],
+  M3 +3.5 [0.6, 6.4] / task +2.1 n.s.; vs the L0/L8 mix at equal energy (`controller/board_compare.py`) +0.4 to +2.0, n.s.
+  measured/predicted latency 1.06 (15 W) / 1.41 (load). README "Board results" section written.
+- **Paper (user asked, 2026-11-20 evening; overrides the no-paper-edits rule for this change):** controller added: method Sect. 3.4 rewritten (three
+  rules, drift-plus-penalty with \cite{neely2010stochastic}, compiled engines), new Sect. 5.5 "Choosing the width at run time" + Table 7
+  (A2 budget simulation; board A2 + nine-width M3), contribution 5, one abstract sentence, limitation replaced. 17 pages (user: ignore the limit,
+  will edit). Backups `paper/main_backup_2026-11-20b.tex`, `references_backup_2026-11-20b.bib`. paper/ is gitignored, so not committed.

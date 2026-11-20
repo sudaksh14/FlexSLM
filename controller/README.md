@@ -36,7 +36,12 @@ Runtime policies (same `choose(Request)` / `observe(level, ms, J)` interface):
 - `data/jetson/{widths_15W,switch}.jsonl`: 0.6B shape-only run, Jetson Orin Nano 15 W, from
   `C:\Users\skalra\Workspace\jetson_logs_mednest\mednest-results\shape_only_full\`.
 
-Re-copy for another model: `ssh das6 'cd /var/scratch/skalra/flexslm/results && tar cf - gen.<model>-level?.t32.samples.jsonl' | tar xf - -C controller/data/samples`, then `--model <model>`.
+- A2 (`data_io.A2G`, the paper's main 0.6B model: fine-tuning only, 3 widths 188M / 364M / 596M):
+  `gen.hf_export-flexllama__sft.paper.qwen3_0p6b_nested.no_stage1-level{0,1,2}.t32.samples.jsonl`, stored a second time as
+  `..._no_stage1_grid048-level{0,4,8}`: its widths have the shapes of grid levels 0 / 4 / 8, so the 9-level Jetson
+  profile applies unchanged.
+
+Re-copy for another model (Git Bash: `export SSH_AUTH_SOCK=~/.ssh/agent.sock` first): `ssh das6 'cd /var/scratch/skalra/flexslm/results && tar cf - gen.<model>-level?.t32.samples.jsonl' | tar xf - -C controller/data/samples`, then `--model <model>`.
 
 ## Run
 
@@ -44,9 +49,10 @@ Re-copy for another model: `ssh das6 'cd /var/scratch/skalra/flexslm/results && 
 cd controller
 python test_controller.py                 # 7 unit tests, synthetic inputs
 python data_io.py                         # profile fit
-python offline.py [--answer eos|forced32] # Pareto / hull / oracle
-python simulate.py budget  [--answer ...] [--V 10] [--task-table shrunk|scaled|raw]
-python simulate.py thermal [--answer ...] [--slowdown 1.3] [--urgent-level 8 --urgent-scale 1.0]
+python offline.py [--answer eos|forced32] [--model M] # Pareto / hull / oracle (M: default M3; A2 = data_io.A2G)
+python simulate.py budget  [--answer ...] [--V 10] [--task-table shrunk|scaled|raw] [--model M]
+python simulate.py thermal [--answer ...] [--slowdown 1.3] [--urgent-level 8 --urgent-scale 1.0] [--model M]
+python board_compare.py <dir>/controller_full.jsonl   # board run: policy vs the fixed min/max mix at equal energy
 python deploy.py --backend views|compiled --weight-mb N [--p90-ms D] [--energy-j B]
 ```
 Outputs: `out/*.json` and `out/*.txt` (gitignored).
@@ -86,6 +92,73 @@ Thermal scenario (`out/thermal.eos.txt`; 30 % urgent with deadline = median pred
 46 % = even L0 misses there); overall misses 15.9 % → 10.4 %, accuracy −0.3 [−0.95, +0.33]. With `forced32`
 (wider latency range): 100 % → 22.5 %. Feedback + task-aware queue at 1.85 J: 25.0 acc, 7.7 % misses, 1.84 J.
 
+### A2, the paper's 3-width model (`out/*A2*`, same protocol)
+
+A2 L0 / L4 / L8 (188M / 364M / 596M) = 20.8 / 22.7 / 30.5 at 1.23 / 1.81 / 2.49 J (eos answers). Hull = **{L0, L8}**:
+the 364M width lies 2.6 points under the L0/L8 time-share at its energy, so the queue time-shares the two ends and
+almost never picks it (14-102 of 6,423 requests). Oracle 45.8 (55.7 if independent errors).
+
+| Budget J/ans | best fixed width within budget | queue (task-agnostic) | queue (task-aware) | task-aware − fixed | task-aware − agnostic |
+|---|---|---|---|---|---|
+| 1.43 | L0 21.1 | 22.5 | 24.4 | +3.3 [+2.7, +4.0] | +1.9 [+1.3, +2.5] |
+| 1.64 | L0 21.1 | 24.8 | 25.4 | +4.3 [+3.5, +5.1] | +0.6 [−0.2, +1.2] |
+| 1.85 | L4 22.8 | 27.2 | 27.7 | +4.9 [+3.3, +6.6] | +0.5 [−0.3, +1.3] |
+| 2.05 | L4 22.8 | 28.1 | 29.7 | +6.9 [+5.2, +8.7] | +1.6 [+0.8, +2.3] |
+| 2.26 | L4 22.8 | 29.6 | 29.8 | +7.0 [+5.3, +8.9] | +0.2 [−0.1, +0.5] |
+
+The gains over a fixed width are larger than on M3 (+2.3 to +3.6) because A2's accuracy jumps between 364M and 596M:
+any budget that admits some full-width answers beats every fixed width it can afford. Thermal (×1.3): urgent misses
+during the slowdown 98.5 % open-loop → 48.6 % with feedback (floor: L0 misses 45.4 %), overall 14.8 % → 9.1 %,
+accuracy −0.47 [−0.97, +0.02].
+
+## Board results (Jetson Orin Nano, 15 W, 2026-11-20)
+
+630 requests (90 per test set, evaluation half) × 6 policies, one request at a time, phases `15W:210,15W+gpu:210,15W:210`
+(the middle third runs a co-running CUDA matmul load, 60 % duty), 30 % urgent requests (deadline = median predicted
+full-width latency, 359 ms), the rest 869 ms. `--score cluster` with random weights built in memory (`--random-from`):
+latency and energy are measured, correctness is the cluster's answer at the chosen width. Energy: VDD_IN over each
+request, net of idle (3.9 W); in the load phase also net of the load's own work (below). Outputs (copies):
+`jetson_logs_mednest/mednest-results/controller_full/` (M3) and `controller_full_A2/` (A2).
+
+| Policy | M3 acc | M3 J | M3 miss | A2 acc | A2 J | A2 miss | A2 urgent misses, load phase |
+|---|---|---|---|---|---|---|---|
+| fixed full width | 25.7 | 3.05 | 26.3 % | 30.8 | 3.04 | 28.1 % | 100 % |
+| fixed narrowest | 19.8 | 1.27 | 4.4 % | 20.3 | 1.25 | 7.1 % | 40.6 % |
+| deadline (open loop) | 24.9 | 2.75 | 21.9 % | 30.0 | 2.68 | 20.8 % | 95.3 % |
+| deadline + feedback | 24.0 | 2.49 | 14.9 % | 28.6 | 2.48 | 11.0 % | 29.7 % |
+| queue, B = 1.78 J | 23.3 | 1.78 | 6.8 % | 24.1 | 1.78 | 6.7 % | 21.9 % |
+| queue task-aware, B = 1.78 J | 21.9 | 1.78 | 5.2 % | 25.4 | 1.78 | 5.4 % | 20.3 % |
+
+- The device was 6 % slower than its profile at 15 W and 41 % slower under the load (measured / predicted latency
+  1.06 / 1.41); the feedback factor tracked it (A2 deadline+fb: rho 0.99 → 1.54 → 1.13 at the end of the three phases).
+- Feedback vs open loop (paired, same stream): misses −7.0 points [−9.5, −4.4] (M3) and −9.8 [−12.5, −7.6] (A2), urgent
+  misses under load 98 → 28 % (M3) and 95 → 30 % (A2), 0.21-0.26 J less per answer, accuracy −0.95 [−2.5, +0.6] and
+  −1.4 [−3.0, +0.04]: feedback drops width when the device slows, which costs a little accuracy.
+- Energy queues at 1.78 J stay on budget (1.78 J measured) and beat the best fixed width that fits it (the narrowest):
+  M3 +3.5 [+0.6, +6.4] (agnostic), A2 +3.8 [+0.9, +6.7] (agnostic) and +5.1 [+1.9, +8.2] (task-aware). Against
+  the L0/L8 mix at the same measured energy (`board_compare.py`): +0.4 to +2.0, CIs include 0. Task-aware vs agnostic:
+  A2 +1.3 [−0.3, +3.0], M3 −1.4 [−3.7, +1.0]; 630 requests cannot resolve 1-2 points (the 6,423-request
+  simulation above does).
+- Widths used (A2): deadline+fb 113 / 56 / 461 requests at 188M / 364M / 596M; the queues 357-362 / 0-6 / 267-268.
+  The middle width matters only to the deadline rule (as the widest width that meets a deadline), never to the
+  energy budget.
+- Urgent deadlines miss even at full width in the nominal phase (50-60 %), by construction: the deadline is the median
+  predicted latency and the device ran 6 % slower than predicted.
+
+**Energy attribution under a co-running load.** Subtracting idle alone charges the request for the load's power
+(upper bound); subtracting the load's standalone power over-corrects, because the load slows while it shares the GPU
+(lower bound), and its power drifted 8.1 → 10.4 W over a phase as the GPU clocks rose. The runner counts the load's
+finished matmuls (a `/dev/shm` counter), measures J per matmul in load-only windows at the start and end of the phase
+(30.6-32.8 mJ in every window, stable while the power drifted), and charges each request
+`gross − idle·dt − J_per_op·(load ops during the request)`. Full-width energy per answer: 3.00 J without load, 3.13 J
+under load (bounds 1.88 / 4.68). Every record keeps both bounds (`energy_net_loadpower_j`, `energy_net_idle_j`).
+
+**Load start-up.** The load's CUDA context needs ~1 GB of the shared 8 GB next to the resident model and the nine
+decoders; in a first full run it died of out-of-memory at start-up for 4 of 6 policies, unnoticed (kept as
+`controller_full_noload`, invalid). `Load` now empties the caching allocator, waits until the load has finished
+matmuls (retries 3×), and aborts the run otherwise; a load that exits mid-phase also aborts; `analyze_board.py` warns
+about loaded-phase requests without load work.
+
 ## On the Jetson (`jetson_runner.py`)
 
 Serves a request stream for real with the same `policies.py` objects: one export loaded once, every width a view,
@@ -122,9 +195,12 @@ python controller/analyze_board.py <dir>/controller_full.jsonl --ref fixed:L8
 ## Limits / next steps
 
 - DAS-6 dry run 28462 (A10, trained export, smoke bundle) passed: feedback learned rho ~0.25 and kept L8
-  (26.2) where open-loop `deadline` dropped to 23.8; the GPU-load phase raised latency +24 %; device answers
-  agree with the cluster's on 85.7 % (same accuracy). Energy there is the profile model (no rails), and the
-  queue's warm start under-spends on a device far faster than the profile. Board runs pending.
+  (26.2) where open-loop `deadline` dropped to 23.8; device answers agree with the cluster's on 85.7 % (same
+  accuracy). The queue's warm start under-spends on a device far faster than the profile.
+- Board runs use cluster correctness with random weights (`--score cluster`); a `--score device` run with the
+  trained A2 export staged on the board would check that the device's own answers agree.
+- Only one disturbance (GPU load) and one budget (1.78 J) were run on the board; 7 W and CPU load are implemented
+  (`PHASES=15W:210,7W:210,15W:210`, `+cpu`) but not run.
 - Compiled path not measured: convert 2-3 widths to GGUF / TensorRT and profile them on the board (and the
   int4 full model, the obvious reviewer comparison).
 - Router / cascade: needs per-question confidence (answer-letter margin) from eval; not in the samples files.

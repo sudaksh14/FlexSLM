@@ -30,6 +30,15 @@ SHORT = {"openlifescienceai/medqa": "MedQA", "openlifescienceai/medmcqa": "MCQA"
 SOURCES = list(SHORT)
 
 M3 = "hf_export-flexllama__sft.paper.qwen3_0p6b_nested"
+# A2 (the paper's main 0.6B model: no Stage 1, 3 widths 188M/364M/596M). Its levels 0/1/2 have the shapes of grid
+# levels 0/4/8, so its samples are copied under grid level numbers (level1 -> level4, level2 -> level8) and the
+# 9-level Jetson profile applies unchanged. See README.md, Inputs.
+A2 = "hf_export-flexllama__sft.paper.qwen3_0p6b_nested.no_stage1"
+A2G = A2 + "_grid048"
+
+
+def short_model(model: str) -> str:
+    return {M3: "M3", A2G: "A2"}.get(model, model.rsplit(".", 1)[-1])
 
 
 # ----------------------------------------------------------------------------- accuracy side
