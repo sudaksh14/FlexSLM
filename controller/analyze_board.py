@@ -100,6 +100,11 @@ def main():
                                                for ph, (a, lo, hi) in by_e.items()))
             res[name]["energy_by_phase"] = {ph: {"attributed": float(np.mean(a)), "lower": float(np.nanmean(lo)),
                                                  "upper": float(np.nanmean(hi))} for ph, (a, lo, hi) in by_e.items()}
+    idle_load = {name: sum(1 for r in rs if "+" in r["phase"] and r.get("energy_net_idle_j") is not None and not r.get("load_ops"))
+                 for name, rs in reqs.items()}
+    if any(idle_load.values()):
+        print("WARNING requests in loaded phases with no load work (load not running):",
+              {k: v for k, v in idle_load.items() if v})
     if base:
         print("load baselines (idle %.2f W): policy phase at  W  ops/s  mJ/op" % (base[0]["idle_power_w"] or float("nan")))
         for b in base:

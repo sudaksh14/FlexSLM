@@ -66,15 +66,37 @@ CPU_LOAD = "while True: pass"
 class Load:
     """A co-running process for one phase (started/stopped around it)."""
 
-    def __init__(self, kind, duty, size, n_cpu):
+    def __init__(self, kind, duty, size, n_cpu, tries=3, ready_s=60.0):
         self.kind, self.procs, self.counter = kind, [], None
         if kind == "gpu":
+            # The load's CUDA context needs ~1 GB of the board's shared memory next to the resident model and
+            # decoders; at start-up it can fail with an out-of-memory error after this process has moved on.
+            # Wait until it has really finished matmuls, retry with the caching allocator emptied, and abort the
+            # run if it never starts (a "loaded" phase without load would be silently wrong).
+            import gc
             import tempfile
-            fd, self.counter = tempfile.mkstemp(prefix="ctrl_load_", dir="/dev/shm" if os.path.isdir("/dev/shm") else None)
-            os.write(fd, b"\0" * 8)
-            os.close(fd)
-            self.procs = [subprocess.Popen([sys.executable, "-c", GPU_LOAD, str(size), str(duty), self.counter])]
-            time.sleep(3.0)                          # CUDA context + first kernels before timing resumes
+            import torch
+            for attempt in range(1, tries + 1):
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                fd, self.counter = tempfile.mkstemp(prefix="ctrl_load_",
+                                                    dir="/dev/shm" if os.path.isdir("/dev/shm") else None)
+                os.write(fd, b"\0" * 8)
+                os.close(fd)
+                p = subprocess.Popen([sys.executable, "-c", GPU_LOAD, str(size), str(duty), self.counter])
+                self.procs = [p]
+                end = time.monotonic() + ready_s
+                while time.monotonic() < end and p.poll() is None and self.ops() < 10:
+                    time.sleep(0.2)
+                if p.poll() is None and self.ops() >= 10:
+                    self.start_attempts = attempt
+                    break
+                print(f"    [load] gpu load not running (attempt {attempt}/{tries}, exit {p.poll()})", flush=True)
+                self.stop()
+                time.sleep(5.0)
+            else:
+                raise RuntimeError(f"gpu load did not start after {tries} attempts")
         elif kind == "cpu":
             self.procs = [subprocess.Popen([sys.executable, "-c", CPU_LOAD]) for _ in range(n_cpu)]
             time.sleep(0.5)
@@ -104,6 +126,10 @@ class Load:
                 os.remove(self.counter)
             except OSError:
                 pass
+            self.counter = None
+
+    def alive(self):
+        return bool(self.procs) and all(p.poll() is None for p in self.procs)
 
 
 def parse_phases(spec):
@@ -348,6 +374,8 @@ def main():
                             g = decs.get(level).generate(ids, n_new[i][level], eos)
                             tb = time.monotonic()
                             ops1 = load.ops() if load is not None else None
+                            if load is not None and not load.alive():
+                                raise RuntimeError(f"{load_kind} load exited during the phase (request {i})")
                             lat = g["total_ms"] + sw
                             gross = window_energy_j(ps.trace, rail, ta, tb)
                             en_idle = en_lo = load_ops = None
