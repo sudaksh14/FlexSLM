@@ -141,7 +141,11 @@ def make_policy(spec, prof, levels, bundle, budget_energy):
 def main():
     p = base_parser(__doc__)
     p.add_argument("--bundle", required=True)
-    p.add_argument("--elastic", required=True, help="MedNest export dir with level<k>/ subdirs (widest has weights)")
+    p.add_argument("--elastic", default=None, help="MedNest export dir with level<k>/ subdirs (widest has weights)")
+    p.add_argument("--random-from", default=None,
+                   help="instead of --elastic: dir of the base model (config + tokenizer, e.g. ~/mednest/models/"
+                        "Qwen3-0.6B); random seeded weights built in memory, widths of jetson/make_random_export.py; "
+                        "nothing written to disk (shape-only, --score cluster only)")
     p.add_argument("--levels", type=int, nargs="*", default=None, help="default: every level in bundle and export")
     p.add_argument("--profile", required=True, help="bench_widths.py output the controller predicts from")
     p.add_argument("--phases", default="keep:210,keep+gpu:210,keep:210")
@@ -184,8 +188,21 @@ def main():
     if n_total > len(reqs):
         sys.exit(f"phases need {n_total} requests, bundle has {len(reqs)}")
     reqs = reqs[:n_total]
-    dirs = el.level_dirs_of(args.elastic)
-    levels = sorted(set(args.levels if args.levels is not None else dirs) & set(dirs) & set(bundle["levels"]))
+    if (args.elastic is None) == (args.random_from is None):
+        sys.exit("give exactly one of --elastic / --random-from")
+    if args.random_from:
+        if args.score != "cluster":
+            sys.exit("--random-from has random weights: only --score cluster")
+        import make_random_export as mre             # jetson/ is on sys.path (mednest_jetson import)
+        widths = [dict(hidden_size=h, num_attention_heads=a, num_key_value_heads=k, intermediate_size=m)
+                  for h, a, k, m in zip(mre.HIDDEN, mre.HEADS, mre.KV, mre.MLP)]
+        avail = list(range(len(widths)))
+        tok_dir = args.random_from
+    else:
+        dirs = el.level_dirs_of(args.elastic)
+        avail = sorted(dirs)
+        tok_dir = dirs[max(dirs)]
+    levels = sorted(set(args.levels if args.levels is not None else avail) & set(avail) & set(bundle["levels"]))
     prof = D.load_profile(args.profile)
     missing = set(levels) - set(prof.levels)
     if missing:
@@ -193,7 +210,7 @@ def main():
     li = {l: bundle["levels"].index(l) for l in levels}
     dtype = torch_dtype(args.dtype)
 
-    tok = AutoTokenizer.from_pretrained(dirs[max(dirs)])
+    tok = AutoTokenizer.from_pretrained(tok_dir)
     enc = [wl.encode(tok, wl.prompt_for(r, "as_is"), "as_is", "cpu") for r in reqs]
     plen = [int(x.shape[1]) for x in enc]
     if args.score == "cluster":    # tokens the trained model generated at each width (+1 for its end token)
@@ -217,11 +234,24 @@ def main():
              "phases": phases, "policies": args.policies, "score": args.score, "urgent_ms": urgent_ms,
              "routine_ms": routine_ms, "urgent_frac": args.urgent_frac, "no_deadlines": args.no_deadlines,
              "budget_energy_pred_j": budget_energy, "profile": args.profile, "n_requests": n_total,
+             "weights": args.elastic or f"random(seed {args.seed}) from {args.random_from}",
              "load": {"duty": args.load_duty, "size": args.load_size, "cpus": args.load_cpus}})
     print(f"[controller] {n_total} requests, levels {levels}, urgent {urgent_ms:.0f} ms, routine {routine_ms:.0f} ms, "
           f"score={args.score}", flush=True)
 
-    e = el.ElasticModel.load(dirs[top], [dirs[l] for l in sorted(dirs)], device=args.device, dtype=dtype)
+    if args.random_from:
+        from transformers import AutoConfig, AutoModelForCausalLM
+        cfg = AutoConfig.from_pretrained(args.random_from)
+        for k, v in widths[-1].items():
+            if getattr(cfg, k) != v:
+                sys.exit(f"widest width differs from {args.random_from} in {k}")
+        torch.manual_seed(args.seed)
+        with torch.device(args.device):
+            full = AutoModelForCausalLM.from_config(cfg, torch_dtype=dtype).eval()
+        full.generation_config = __import__("transformers").GenerationConfig.from_pretrained(args.random_from)
+        e = el.ElasticModel.from_widths(full, widths)
+    else:
+        e = el.ElasticModel.load(dirs[top], [dirs[l] for l in sorted(dirs)], device=args.device, dtype=dtype)
     e.build_all()
     eos = wl.eos_ids(e.width(top), tok)
     decs = ElasticDecoders(e, max_len_for(plen, 32), use_graph=(args.decode == "graph"))

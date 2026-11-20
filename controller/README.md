@@ -102,7 +102,9 @@ mid-stream (`15W:210,15W+gpu:210,15W:210`: a co-running CUDA matmul loop; or `7W
 | `analyze_board.py` | laptop | per-policy accuracy, J, latency, misses per phase, paired CI vs a reference policy, measured/predicted latency per phase, rho per phase |
 | `das6_dryrun.sbatch` | DAS-6 node207 | mechanics check on an A10 with the trained export (no rails, no nvpmodel); both scorings |
 
-`--score cluster` (default): no checkpoint on the board. The random-weight shape-only export decodes, per
+`--score cluster` (default): no checkpoint on the board. `run_jetson.sh` uses the random export if present,
+else `--random-from ~/mednest/models/Qwen3-0.6B` (seeded random weights built in GPU memory from the config,
+the 9 widths of `jetson/make_random_export.py`; nothing written to disk). The random weights decode, per
 request and width, exactly as many tokens as the trained model produced on the cluster (EOS ignored); correctness
 is the cluster's answer at that width. Latency/energy depend only on shapes and token counts, so this measures
 the controller's real cost; accuracy is the trained model's. `--score device` (trained export staged):
