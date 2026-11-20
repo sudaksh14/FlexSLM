@@ -85,24 +85,27 @@ def main():
                 else:
                     ends.append((ph, round(r["rho"], 3)))
             print(f"  rho at the end of each phase ({name}): {ends}")
-    # energy per device phase: attributed (net of the phase baseline: idle, or idle + the co-running load) and
-    # net of idle only (includes the load's draw during the request); the true marginal lies between the two
+    # energy per device phase: attributed (loaded phases: net of idle and of the load's ops during the request),
+    # and the two bounds: whole standalone load power removed (lower) / only idle removed (upper)
     if any(r.get("energy_net_idle_j") is not None for rs in reqs.values() for r in rs):
-        print("J/answer by device phase (attributed | net of idle only):")
+        print("J/answer by device phase: attributed [lower, upper]")
         for name, rs in reqs.items():
-            by_e = defaultdict(lambda: ([], []))
+            by_e = defaultdict(lambda: ([], [], []))
             for r in rs:
-                a, b = by_e[r["phase"].split("@")[-1]]
+                a, lo, hi = by_e[r["phase"].split("@")[-1]]
                 a.append(r["energy_j"])
-                b.append(r["energy_net_idle_j"] if r.get("energy_net_idle_j") is not None else np.nan)
-            print(f"  {name:18s} " + "  ".join(f"{ph} {np.mean(a):.2f} | {np.nanmean(b):.2f}"
-                                               for ph, (a, b) in by_e.items()))
-            res[name]["energy_by_phase"] = {ph: {"attributed": float(np.mean(a)), "net_idle": float(np.nanmean(b))}
-                                            for ph, (a, b) in by_e.items()}
+                lo.append(r.get("energy_net_loadpower_j", r["energy_j"]))
+                hi.append(r["energy_net_idle_j"] if r.get("energy_net_idle_j") is not None else np.nan)
+            print(f"  {name:18s} " + "  ".join(f"{ph} {np.mean(a):.2f} [{np.nanmean(lo):.2f}, {np.nanmean(hi):.2f}]"
+                                               for ph, (a, lo, hi) in by_e.items()))
+            res[name]["energy_by_phase"] = {ph: {"attributed": float(np.mean(a)), "lower": float(np.nanmean(lo)),
+                                                 "upper": float(np.nanmean(hi))} for ph, (a, lo, hi) in by_e.items()}
     if base:
-        print("load baselines (W, idle %.2f):" % (base[0]["idle_power_w"] or float("nan")),
-              [(b["policy"], b["phase"], b["at"], None if b["power_w"] is None else round(b["power_w"], 2))
-               for b in base])
+        print("load baselines (idle %.2f W): policy phase at  W  ops/s  mJ/op" % (base[0]["idle_power_w"] or float("nan")))
+        for b in base:
+            f = lambda v, k=1.0, d=2: "-" if v is None else f"{k * v:.{d}f}"
+            print(f"  {b['policy']:18s} {b['phase']:10s} {b['at']:5s} {f(b['power_w'])}  {f(b.get('ops_per_s'), d=0)}  "
+                  f"{f(b.get('j_per_op'), 1000.0)}")
     out = args.out or os.path.join(os.path.dirname(os.path.abspath(__file__)), "out",
                                    "board." + os.path.basename(args.path).replace(".jsonl", ".json"))
     os.makedirs(os.path.dirname(out), exist_ok=True)

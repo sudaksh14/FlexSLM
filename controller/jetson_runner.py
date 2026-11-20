@@ -45,14 +45,19 @@ sys.path.insert(0, os.path.join(REPO, "jetson"))
 from mednest_jetson.cli import base_parser, cooldown, setup, torch_dtype  # noqa: E402
 
 GPU_LOAD = r"""
-import sys, time, torch
+import mmap, struct, sys, time, torch
 size, duty, period = int(sys.argv[1]), float(sys.argv[2]), 0.05
+f = open(sys.argv[3], "r+b")
+m = mmap.mmap(f.fileno(), 8)
 a = torch.randn(size, size, device="cuda", dtype=torch.float16) / size ** 0.5
+n = 0
 while True:
     t = time.monotonic()
     while time.monotonic() - t < period * duty:
         b = a @ a
         torch.cuda.synchronize()
+        n += 1
+        m[:8] = struct.pack("q", n)              # finished matmuls, read by the runner (energy attribution)
     time.sleep(period * (1 - duty))
 """
 CPU_LOAD = "while True: pass"
@@ -62,9 +67,13 @@ class Load:
     """A co-running process for one phase (started/stopped around it)."""
 
     def __init__(self, kind, duty, size, n_cpu):
-        self.kind, self.procs = kind, []
+        self.kind, self.procs, self.counter = kind, [], None
         if kind == "gpu":
-            self.procs = [subprocess.Popen([sys.executable, "-c", GPU_LOAD, str(size), str(duty)])]
+            import tempfile
+            fd, self.counter = tempfile.mkstemp(prefix="ctrl_load_", dir="/dev/shm" if os.path.isdir("/dev/shm") else None)
+            os.write(fd, b"\0" * 8)
+            os.close(fd)
+            self.procs = [subprocess.Popen([sys.executable, "-c", GPU_LOAD, str(size), str(duty), self.counter])]
             time.sleep(3.0)                          # CUDA context + first kernels before timing resumes
         elif kind == "cpu":
             self.procs = [subprocess.Popen([sys.executable, "-c", CPU_LOAD]) for _ in range(n_cpu)]
@@ -72,6 +81,14 @@ class Load:
         for p in self.procs:
             if p.poll() is not None:
                 raise RuntimeError(f"{kind} load process exited with {p.returncode}")
+
+    def ops(self):
+        """Work units the load has finished so far (GPU: matmuls), or None (no counter)."""
+        if self.counter is None:
+            return None
+        import struct
+        with open(self.counter, "rb") as f:
+            return struct.unpack("q", f.read(8))[0]
 
     def stop(self):
         for p in self.procs:
@@ -82,6 +99,11 @@ class Load:
             except subprocess.TimeoutExpired:
                 p.kill()
         self.procs = []
+        if self.counter is not None:
+            try:
+                os.remove(self.counter)
+            except OSError:
+                pass
 
 
 def parse_phases(spec):
@@ -114,15 +136,19 @@ def window_energy_j(trace, rail, t0, t1, wait_s=0.03):
     return e / 1000.0                                # mW * s -> J
 
 
-def baseline_power_w(trace, rail, seconds):
-    """Mean rail power (W) over the next `seconds` with no request running (None without rails)."""
+def baseline_power_w(trace, rail, seconds, load=None):
+    """Mean rail power (W) over the next `seconds` with no request running (None without rails), and the
+    load's work rate over the same window (ops/s; None without a counter)."""
     if rail is None or seconds <= 0:
-        return None
+        return None, None
+    c0 = load.ops() if load is not None else None
     t0 = time.monotonic()
     time.sleep(seconds)
     t1 = time.monotonic()
+    c1 = load.ops() if load is not None else None
     e = window_energy_j(trace, rail, t0, t1)
-    return None if e is None else e / (t1 - t0)
+    rate = (c1 - c0) / (t1 - t0) if c0 is not None and c1 is not None else None
+    return (None if e is None else e / (t1 - t0)), rate
 
 
 def make_policy(spec, prof, levels, bundle, budget_energy):
@@ -294,16 +320,22 @@ def main():
                         device.set_power_mode(mode, require=True)
                         cur_mode = mode
                     load = Load(load_kind, args.load_duty, args.load_size, args.load_cpus) if load_kind else None
-                    # Power subtracted from each request: idle, or (loaded phase) the board with the load running
-                    # and nothing else. The load slows down while a request shares the GPU, so this removes at
-                    # most the load's own draw: the attributed energy is a lower bound, idle-net an upper bound.
-                    base_w, base_src = idle_w, "idle"
+                    # Loaded phase: the load's draw is taken out of each request's energy. Baseline window (load
+                    # alone): P_load above idle and its work rate -> J per load op. A request is charged
+                    #   gross - idle * dt - J_per_op * (load ops finished during the request)
+                    # ("ops" attribution: the load slows while it shares the GPU, and clock drift changes ops and
+                    # power together). Bounds kept per request: gross - P_load * dt (whole standalone draw
+                    # removed: lower) and gross - idle * dt (nothing removed: upper).
+                    base_w, j_per_op = idle_w, None
                     if load is not None:
-                        lb = baseline_power_w(ps.trace, rail, args.load_baseline_s)
+                        lb, rate = baseline_power_w(ps.trace, rail, args.load_baseline_s, load)
                         if lb is not None:
-                            base_w, base_src = lb, "load"
+                            base_w = lb
+                            if rate and idle_w is not None:
+                                j_per_op = max(0.0, lb - idle_w) / rate
                         w.write({"kind": "load_baseline", "policy": pol.name, "phase": f"{mode}+{load_kind}",
-                                 "at": "start", "power_w": lb, "idle_power_w": idle_w, "seconds": args.load_baseline_s})
+                                 "at": "start", "power_w": lb, "ops_per_s": rate, "j_per_op": j_per_op,
+                                 "idle_power_w": idle_w, "seconds": args.load_baseline_s})
                     try:
                         for _ in range(n):
                             r = reqs[i]
@@ -311,15 +343,26 @@ def main():
                             level = pol.choose(Request(prompt_tokens=plen[i], deadline_ms=deadlines[i], task=task))
                             sw = e.switch(level)["switch_ms"] if level != prev else 0.0
                             ids = enc[i].to(args.device)
+                            ops0 = load.ops() if load is not None else None
                             ta = time.monotonic()
                             g = decs.get(level).generate(ids, n_new[i][level], eos)
                             tb = time.monotonic()
+                            ops1 = load.ops() if load is not None else None
                             lat = g["total_ms"] + sw
                             gross = window_energy_j(ps.trace, rail, ta, tb)
-                            en_idle = None
-                            if gross is not None and base_w is not None:
-                                en, en_src = gross - base_w * (tb - ta), "measured"
-                                en_idle = gross - idle_w * (tb - ta) if idle_w is not None else None
+                            en_idle = en_lo = load_ops = None
+                            base_src = "idle"
+                            if gross is not None and idle_w is not None:
+                                en_idle = gross - idle_w * (tb - ta)
+                                en_lo = gross - base_w * (tb - ta)
+                                if load is None:
+                                    en = en_idle
+                                elif j_per_op is not None and ops0 is not None:
+                                    load_ops = ops1 - ops0
+                                    en, base_src = en_idle - j_per_op * load_ops, "load_ops"
+                                else:                       # no counter (cpu load): whole standalone draw removed
+                                    en, base_src = en_lo, "load_power"
+                                en_src = "measured"
                             else:
                                 en, en_src = float(prof.energy_j(level, lat)), "model"
                             pol.observe(level, lat, en)
@@ -339,6 +382,7 @@ def main():
                                    "deadline_ms": deadlines[i], "latency_ms": lat, "met": (deadlines[i] is None
                                    or lat <= deadlines[i]), "switch_ms": sw, "energy_j": en, "energy_src": en_src,
                                    "energy_gross_j": gross, "energy_net_idle_j": en_idle,
+                                   "energy_net_loadpower_j": en_lo, "load_ops": load_ops, "j_per_load_op": j_per_op,
                                    "baseline_w": base_w, "baseline_src": base_src,
                                    "predicted_ms": float(prof.latency_ms(level, plen[i], n_pred)),
                                    "rho": pred.rho if pred is not None else None, "Q": getattr(pol, "Q", None),
@@ -349,8 +393,11 @@ def main():
                             prev = level
                             i += 1
                         if load is not None:         # drift check of the load's draw over the phase
+                            lb, rate = baseline_power_w(ps.trace, rail, args.load_baseline_s, load)
                             w.write({"kind": "load_baseline", "policy": pol.name, "phase": f"{mode}+{load_kind}",
-                                     "at": "end", "power_w": baseline_power_w(ps.trace, rail, args.load_baseline_s),
+                                     "at": "end", "power_w": lb, "ops_per_s": rate,
+                                     "j_per_op": (max(0.0, lb - idle_w) / rate if lb is not None and rate
+                                                  and idle_w is not None else None),
                                      "idle_power_w": idle_w, "seconds": args.load_baseline_s})
                     finally:
                         if load is not None:
