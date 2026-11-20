@@ -50,4 +50,4 @@ done
 
 # 1.7B reasoning curve (28396 finished with BUDGETS=64 only): rescore the stored generations at every budget (CPU).
 note "rescore 28396: $(sbatch --parsable --partition=defq $N207 --time=00:40:00 --output=jobs/%x-%j.out --job-name=flexslm_rescore \
-   --wrap 'cd ~/FlexSLM; source scripts/das6/common.sh cpu; python -I -m eval.rescore_budgets results/gen.Qwen-Qwen3-1.7B.t4096.pthink.n300.sq3 --budgets 64,128,256,512,1024,2048,4096 --tokenizer Qwen/Qwen3-1.7B --per_source 300')"
+   --wrap 'cd ~/FlexSLM; source scripts/das6/common.sh cpu; python -m eval.rescore_budgets results/gen.Qwen-Qwen3-1.7B.t4096.pthink.n300.sq3 --budgets 64,128,256,512,1024,2048,4096 --tokenizer Qwen/Qwen3-1.7B --per_source 300')"

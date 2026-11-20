@@ -167,6 +167,19 @@ SFT_RUNS = [
         hf_start=start_weights(FINAL_ORDERING, hf_model="Qwen/Qwen3-1.7B", preset="qwen3-1.7b-gqa"),
         kd_lambda=0.0, tokenizer_name="Qwen/Qwen3-1.7B", micro_batch_size=4,   # as sft.paper.qwen3_1p7b_nested
         wandb_project_name="MedNest_s2only_1p7b")),
+    # MedNest on Qwen3-1.7B WITH KD (user, 2026-11-20): the teacher is the conventionally fine-tuned Qwen3-1.7B
+    # (E_A, the same size as the full width; the 1.7B baseline itself). The student's 10-level runs showed that
+    # this lifts the full width above its own teacher (39.3-40.2 vs 37.9). Otherwise = the CE-only config above
+    # (= the 0.6B method A2 on the larger backbone). DAS-6 node205, 2 x A40.
+    ("sft.paper.qwen3_1p7b_nested.no_stage1.kd", None, dict(_S2,
+        hf_preset="qwen3-1.7b-gqa", level_fractions=(0.5, 0.75, 1.0),
+        hf_start=start_weights(FINAL_ORDERING, hf_model="Qwen/Qwen3-1.7B", preset="qwen3-1.7b-gqa"),
+        # micro-batch 2: 4 ran out of memory in the KL of the longest batch (smoke 28463, 44.1 GB of 44.7 GB on an A40;
+        # 1.7B student + 1.7B teacher). Exact micro-batching, so the gradient and the 32 sequences per step are unchanged.
+        # Micro-batch 2 alone also ran out of memory (smoke 28469: 37 GB after step 1, i.e. static memory: fp32 weights +
+        # grads + AdamW state + bf16 teacher) -> ZeRO-1 shards the AdamW state over the 2 ranks (~7 GB less per GPU, same updates).
+        tokenizer_name="Qwen/Qwen3-1.7B", micro_batch_size=2, zero_optimizer=True,
+        wandb_project_name="MedNest_s2only_1p7b_kd")),
     # A1: no importance ordering (Stage 1 and Stage 2 both without it).
     ("sft.paper.qwen3_0p6b_nested.no_order", "s1.qwen3_0p6b.full.no_order", dict(_S2,
         wandb_project_name="MedNest_s2_no_order")),
