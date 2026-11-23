@@ -53,6 +53,7 @@ python offline.py [--answer eos|forced32] [--model M] # Pareto / hull / oracle (
 python simulate.py budget  [--answer ...] [--V 10] [--task-table shrunk|scaled|raw] [--model M]
 python simulate.py thermal [--answer ...] [--slowdown 1.3] [--urgent-level 8 --urgent-scale 1.0] [--model M]
 python board_compare.py <dir>/controller_full.jsonl   # board run: policy vs the fixed min/max mix at equal energy
+python two_model.py                        # two separate full-width models vs the nested models (simulation)
 python deploy.py --backend views|compiled --weight-mb N [--p90-ms D] [--energy-j B]
 ```
 Outputs: `out/*.json` and `out/*.txt` (gitignored).

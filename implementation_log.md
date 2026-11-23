@@ -1490,3 +1490,86 @@ max_seq 3072):
   rules, drift-plus-penalty with \cite{neely2010stochastic}, compiled engines), new Sect. 5.5 "Choosing the width at run time" + Table 7
   (A2 budget simulation; board A2 + nine-width M3), contribution 5, one abstract sentence, limitation replaced. 17 pages (user: ignore the limit,
   will edit). Backups `paper/main_backup_2026-11-20b.tex`, `references_backup_2026-11-20b.bib`. paper/ is gitignored, so not committed.
+
+### 2026-11-23: 1.7B ten-width evals and 0.6B reasoning curve analysed, paper filled
+- **DAS-6 queue empty, all done; nodes 205-208 and fatq idle.** Student export 28482 + evals 28483-28492 (all 12,797 q, 0% unboxed) and 28459 (0.6B thinking) finished.
+- **Ten-width 1.7B (intern run 4, our eval), avg / w/o MedCalc:** 0.24B 19.4/20.6, 0.40B 19.6/21.0, 0.50B 20.0/21.1, 0.62B 20.9/21.7, 0.75B 21.5/21.9,
+  0.90B 23.3/23.6, 1.05B 24.5/24.7, 1.33B 30.7/31.2, 1.53B 34.6/35.5, 1.72B 39.0/40.4. Report had 19.8/23.1/39.3 at L0/L5/L9 (within 0.4). Params = shared
+  weights with K = ceil(H/2) (the HF exports repeat kv heads, e.g. L0 253M, L5 951M, L8 1,623M on disk). Teacher (28136, our eval) 37.7, report 37.9.
+  McNemar pooled: full vs teacher p=7e-7 (966 vs 759), vs E_A 36.8 p=3e-9; each step above 0.75B p<1e-4; 1.33B vs A2 596M (30.5) p=0.31;
+  1.05B < A2 596M; 0.24B < A2 188M p=9e-4 (w/o Calc p=0.04); 1.53B < E_A p=5e-12.
+- **Subset of 300/set (2,098 q):** Qwen3-0.6B thinking 15.3/23.5/26.3 at 1,024/2,048/4,096 (845/1,179/1,358 mean tokens); MedNest 596M 31.5 is above (p=2e-5; w/o Calc
+  32.3 vs 29.8, p=0.06). MedNest 1.72B 39.6 vs Qwen3-1.7B thinking 38.5 (2,308 tokens): p=0.35 (w/o Calc 41.2 vs 42.2, p=0.43), 6.5 tokens per answer.
+- **Attribution (old 100M-Stage-1 recipe, nine widths, finished earlier):** full width alone with KD (indep_full) 28.3 vs nested M3 full 27.2 (p=0.14, so no resolvable
+  cost or gain from nesting); without KD nested full 22.6 (p=0.34 vs conventional 23.1; p=1e-36 vs M3): the gain over conventional FT comes from KD.
+  indep_l1 / indep_l0 (Stage 1 + KD) 22.3 / 21.3 vs M3 nested same shape 22.5 / 21.4 (n.s.). Needs the A2-recipe control (indep_l2) to transfer.
+- **Floor:** best constant letter per set, mean of the six multiple-choice sets = 22.4. A2 w/o MedCalc: 596M 31.0, 364M 22.4, 188M 21.4; conventional FT 596M 22.9.
+  So "364M matches conventional FT (p=0.35)" compares two models at the letter-prior floor.
+- **Hipster:** 398309/398310 (indep_l0) and 398312/398313 (indep_l1) trained and exported (hf_export/flexllama__sft.paper.qwen3_0p6b_nested.no_stage1.indep_l{0,1});
+  their evals 398311/398314 PENDING (capacity, 6 of 8 nodes down, est. 11-24 16:54). Trainings 398294 no_kd (est. 11-23 20:35), 398299 no_order (11-24 06:36),
+  398304 single / 398315 indep_l2 / 398318 1.7B CE-only (11-24 23:31). Nothing was submitted, moved or cancelled in this session.
+- **Paper:** backup `paper/main_backup_2026-11-23.tex`. Filled Table qwen17 (all ten widths, ours; bold removed), Table faithmed (three 0.6B thinking rows, MedNest 1.72B subset), text, abstract,
+  conclusion, limitation (39.3 -> 39.0, teacher 37.9 -> 37.7). PDF 18 pages; draft PDF refreshed. Remaining red: independent rows, ablation rows, Separate-shape accuracies, method/related-work TODOs.
+  Not changed (user to decide): the "364M matches" claim and the attribution of the +7.4 to nesting + KD.
+
+### 2026-11-23 (later): two runs moved to DAS-6, 1.7B controller status
+- **User OK'd moving the full-width-alone (indep_l2) and no-KD runs to DAS-6 and cancelling 398318 (1.7B CE-only).** Submitted on DAS-6 (ids in jobs/queue_2026-11-23.ids; same code as A2,
+  node205, 2 x A40, 16/GPU; hipster sft.py only lacks the unused 1.7B `.kd` config):
+  indep_l2 train **28495** -> export 28496 -> eval L2 28497; no_kd train **28498** -> export 28499 -> evals L0-2 28500-28502 (evals pinned to node207, node208 excluded).
+  After 28495 was running, cancelled on hipster: 398294-398298 (no_kd chain), 398315-398317 (indep_l2 chain), 398318-398322 (1.7B CE-only). Still on hipster: no_order 398299-398303, single
+  398304-398308, indep_l0/l1 evals 398311/398314.
+- **1.7B controller, preliminary simulation (laptop, scratch only, nothing added to controller/data):** run 4 per-question results + the 2026-11-19 1.7B shape-only profile
+  (`shape_only_1p7b/widths_15W.jsonl`, 9 widths 0.51-1.72B). Eight of the ten student widths (L2-L9) have a profiled shape within 3% of their parameters; L0/L1 (0.24B/0.40B) have none. Eos answers, accuracy all 12,797 q / budgets on
+  the 6,423-q half: J/answer 1.97 (0.50B) ... 3.99 (1.33B), 4.55 (1.53B), 4.84 (1.72B); energy hull = {0.50B, 1.72B} only: 1.33B / 1.53B lie 2.7 / 2.5 points below the line,
+  1.05B 4.2. Task-aware queue vs best fixed within budget +4.9 ... +12.6 (the last at 3.85 J, where 1.33B misses the budget by 0.05 J). Slowdown x1.3: deadline misses 15.1% -> 5.9% with feedback, acc -1.25 [-1.95, -0.59].
+  Cross-backbone: 0.6B full width 30.5% at 2.49 J is ~7 points above the 1.7B energy hull at that cost and cheaper than the 1.33B width (30.7% at 3.99 J).
+- **Pending for 1.7B on the board (nothing run):** (a) exact ten-shape profile: ten-width json; (b) odd query-head widths (5/7/9/11/15 heads, L0 L1 L3 L5 L8) are not prefix views in `elastic.py`: HF Qwen3
+  needs kv heads that divide query heads, the exporter repeats kv heads (15/15), so the view build raises; needs a custom attention forward or the dense proxy shapes; (c) `jetson_runner.py --random-from` hardcodes the
+  0.6B grid widths, `run_jetson.sh` defaults to Qwen3-0.6B; (d) bundle + profile for run 4; (e) board run (memory next to a 3.44 GB model and the GPU load; ~2.2x the 0.6B run's latency, 630 x 6 policies). Board not reachable now (192.168.0.101 timed out).
+
+### 2026-11-23 (evening): two-model simulation (controller/two_model.py, simulation only)
+- **Setup:** arms = A2 188/364/596M, run 4 at 8 widths (0.50-1.72B, closest profiled shape within 3%), conventional 596M (23.1) and the 1.72B teacher of run 4 (37.7), same shapes.
+  Inputs copied to controller/data (gitignored): `gen.student1p7b_grid-level*`, `gen.conv1p7b_teacher-level9`, `jetson/widths_15W_1p7b.jsonl` (2026-11-19). Output `controller/out/two_model.txt`. 6,423-q evaluation half.
+- **Energy, J/answer (15 W profile):** 188M 1.23, 596M 2.49, 0.50B 1.97, 1.33B 3.99, 1.72B 4.84. Hulls: PAIR = {596M, 1.72B}; nested 1.7B = {0.50B, 1.72B}; BOTH = {188M, 596M, 1.72B}.
+- **Task-aware queue, macro acc at 2.8 / 3.2 / 3.6 / 4.0 J:** N17 nested 1.7B 27.2 / 30.0 / 36.4 / 37.9; PAIR (MedNest full widths, 4.63 GB) 32.1 / 33.4 / 36.8 / 38.6;
+  PAIRc (conventional FT) 28.2 / 30.2 / 34.5 / 36.9; BOTH nested models 32.4 / 35.9 / 37.8 / 38.6. PAIR - N17 +4.8 [3.0, 6.5], +3.3 [1.6, 5.0], +0.3 n.s., +0.7 [0.2, 1.2]; PAIR - PAIRc +3.8, +3.2, +2.2, +1.6 (all CIs > 0);
+  BOTH - PAIR +0.3 n.s., +2.5 [1.6, 3.6], +1.1 [0.1, 2.0], +0.1 n.s. Below 2.4 J PAIR and N17 cannot run; nested 0.6B gives 25.1 / 29.4 / 30.0 at 1.6 / 2.0 / 2.4 J. Differences of about a point at single budgets are policy noise (BOTH < N06 at 2.0 J).
+- **Deadlines (30% urgent, x1.3 slowdown, feedback; urgent 400 ms), acc / miss%:** N06 29.1 / 4.1; N17 33.4 / 8.3; PAIR 36.5 / 10.9; BOTH 35.5 / 4.9. PAIR - N17 acc +3.1 [1.9, 4.2] with misses +2.6; BOTH - PAIR misses -6.0 with acc -1.0.
+- **Checks:** the queue's gains are not an artifact of the unweighted mean over a stream dominated by MedMCQA: on pooled accuracy and on an equal-per-set stream the A2 (paper table) gains are +3.4 to +7.7 over
+  the best fixed width and +1.0 to +3.2 over the hull mix at the same energy (agnostic > hull: it spends energy on short prompts).
+- **Feasibility not shown:** 1.0 GB (indep-l0 shape) OOMed next to the resident 3.44 GB model (shape_only_1p7b, one process with decoders already prepared, nothing released; confounded). *-load is not a tuned policy:
+  assumed 1.7B load 1.9 s (scaled from the 0.6B 0.65 s, not measured), never returns to 1.72B; its numbers are not used.
+- DAS-6 at ~20 min: 28495 at 169/1044 steps (~1.7 h left), no errors.
+
+### 2026-11-23: co-residency test on the Jetson (10.113.206.56, freshly booted, 15 W, PyTorch, bf16, random weights in GPU memory; latency/memory only)
+- Scripts `controller/coresident_test.py`, `run_coresident.sh` (benchmark decoder unchanged), `run_coresident_lean.sh` (`--lean`: last-position logits only, file page cache evicted after build). One fresh process per case,
+  28 questions incl. the 4 longest (2,009 tokens), 32 forced tokens. Raw files in `jetson_logs_mednest/mednest-results/{coresident,coresident_lean}`. One run per case, so fit/no-fit near the limit is not a probability.
+- Unmodified harness: 596M alone and 1.72B alone fit (39.0 / 77.6 ms/token); 596M + 1.72B, 1.72B + nested 0.6B, nested 1.7B + nested 0.6B all FAIL (allocator assert / CUDA OOM) while preparing the second model's decoder; with GPU load also fail. 1.72B alone + load fits (avail 0.6 GB at the end).
+- Lean: 1.72B alone ends with 1.9 GB available (peak alloc 4.07 GB vs 4.39), 596M alone fine. PAIR: models resident (4.6 GB weights, 5.3-5.4 GB with KV/graphs), ran 96 generations (the 24 ordinary questions) then failed on the first of the four longest prompts (free 138 MB).
+  PAIR + GPU load: all 112 generations finished, but with 0.5 GB swap used at the end, 51,662 pages (~200 MB) swapped out during the run and 0.2 GB available. pair3 (1.72B + nested 0.6B with 3 widths) and both (nested 1.7B 3 widths + nested 0.6B 3 widths) failed when preparing the second model's graphs (CUDA graphs for 4 cache buckets x 3 widths), with and without load.
+  Speed when co-resident: 77.5 / 39.1 ms/token vs 77.6 / 39.0 alone (no cost); TTFT after a model switch 234 / 195 ms vs 238 / 195 repeat; under load 115.2 (1.72B, same as alone under load 115.3), TTFT after a switch 389 vs 350, and one answer took 10.1 s.
+- **Reading:** without quantisation the two-model pair (4.63 GB bf16 weights + KV + runtime) does not fit reliably on this 8 GB board (first-prompt failures or swapping); nested 1.7B alone (3.44 GB) has 1.9 GB of margin. Not tested: loading two trained checkpoints from files
+  (worse: CPU copy + page cache), leaner KV caches / fewer CUDA graphs, int8/int4 (would change the argument), 1.7B load time. Every process after the first starts with ~1 GB less MemAvailable than after boot (presumably driver-held, not confirmed; no reboot done).
+- DAS-6 28495 running (1 h 07 m elapsed at this check), 28498 waiting for node205.
+
+### 2026-11-23 (late afternoon): int8 test, PARTIAL (board run and cluster evals still going)
+- **Setup.** Weight-only int8, symmetric, one scale per output row (max-abs/127), embedding / output head / norms in bf16; a narrower nested width = prefix slice of the shared int8 weights + row scales. Same scheme on the cluster as fake int8 (`eval/fake_quant.py`, `test/test_fake_quant.py`,
+  `scripts/das6/fakequant.sbatch`; exports `hf_export/int8__student_1p7b/level{9,7,6,4,2}`, `int8__a2_0p6b/level{2,1,0}`; narrower levels checked to be exact prefixes of the full one). Board: `controller/int8_test.py`, `run_int8.sh` (tmux `int8`, out `~/mednest-results/int8`), one fresh process per case.
+- **No native int8 CUDA matmul in the board's torch 2.8** (`_weight_int8pack_mm` not implemented for CUDA); my layer dequantises on the fly (3.5-9x slower per matrix than bf16; self-test exact). So int8 speed and energy are NOT results; memory is. int8 596M: 167.8 ms/token vs 39.0 bf16.
+- **Finished on the board:** (1) nested 1.7B **bf16**, five even-head widths with exact shapes (lean; ordinary prompts, 14 q): ms/token 31.6 / 41.9 / 53.0 / 64.1 / 77.5, TTFT 195 / 199 / 218 / 257 / 264 ms (no penalty after a width switch), net J per forced-32-token answer 7.3 / 10.5 / 14.3 / 18.0 / 22.1 (0.50 / 0.75 / 1.05 / 1.33 / 1.72B).
+  This replaces the closest-shape profile for these five widths. (2) int8 596M alone: 0.76 GB allocated after build, 4.0 GB available, 596M. int8 1.72B alone: 2.04 GB allocated, 2.9 GB available after build, still running. Not finished: int8 nested, pair, pairn, both, and the three +GPU-load cases.
+- **CORRECTION of the co-residency entry above:** "nested 1.7B leaves about 1.9 GB of margin" was measured for the 1.72B full width ALONE (one width, one set of decoders). With the five widths prepared (decoders + CUDA graphs for all of them) nested 1.7B bf16 ended at 0.67 GB available / 0.17 GB free.
+  The memory comparison with the bf16 pair (which failed or swapped) still favours nested; the size of the margin does not.
+- **Finished on the cluster:** int8 1.72B (28504) 39.3 vs bf16 39.0 (macro; w/o Calc 40.7 vs 40.4), p = 0.52 McNemar, 93.6% of answers identical. Not done: 28505-28511 (1.7B at 1.33 / 1.05 / 0.75 / 0.50B; 0.6B at all three widths).
+- **DAS-6: root put all nodes into drain at 16:27 ("software update")**: node205 drains after 28495 (running, 1 h 34 m at 16:34; `resume=True`, checkpointed), all others (201-204, 206-208) drained. Queued and waiting for nodes to come back:
+  28498 (no_kd), 28496-28497, 28499-28502, 28505-28511. Nothing of mine is affected except waiting; no resubmission needed unless jobs are cancelled by the maintenance. Hipster: only no_order / single chains and 2 independent evals pending, all with Priority.
+- Next when the board run ends: copy `~/mednest-results/int8`, memory table (int8 nested vs pair vs both), then decide whether the int8 pair fits.
+
+### 2026-11-23 16:43: int8 board run STOPPED at the user's request ("no new exps for now on board"); partial result
+- The queue (`run_int8.sh`, tmux `int8`) was stopped after the case in progress: SIGSTOP on the driver did not hold (the process stayed running), so `controller/int8_test.py` was moved aside on the board; the 7 remaining cases exited at once
+  ("can't open file", in run.log; no result files written). File restored afterwards; the board is idle, no tmux session. **Not run: int8 nested, pair, pairn, both, and nested / pair / both + GPU load.** So there is NO measured nested-vs-pair result at int8.
+- **Finished int8 cases (one process each, 8 ordinary + 8 long-prompt generations, memory is the result):** 596M alone: 0.76 GB allocated after build, 1.09 GB with KV/graphs, 4.0 GB available at the end. 1.72B alone: 2.04 GB after build, 2.36 GB with KV/graphs, 2.7 GB available at the end, no swapping.
+  int8 arithmetic (on-the-fly dequantise) 167.8 ms/token (596M, bf16 39.0) and 485.9 ms/token (1.72B, bf16 77.5): kernel cost, NOT int8 speed. `cuda_peak_alloc_gb` of the int8 cases (1.67 / 4.95) includes building in bf16 before quantising, so it is not serving memory.
+- **Expectation, not measured:** by these sizes the int8 pair (1.72B + 596M) would allocate about 2.8 GB of weights + ~0.6 GB KV/graphs, next to ~5.4 GB available at process start, so it should fit; nested int8 1.7B about the same as 1.72B alone (+ CUDA graphs of the extra widths). Memory would then stop separating nested from the pair.
+- **Cluster:** int8 1.72B 39.3 vs bf16 39.0 (p = 0.52). int8 evals 28505-28511 and the no_kd chain still pending: DAS-6 nodes drained by root for a software update since 16:27 (node201 back to idle at 16:42, 205 draining under 28495, the rest drained). Resume: nothing to resubmit unless cancelled.
+- To resume later: copy nothing; on the board `cd ~/FlexSLM && bash controller/run_int8.sh` reruns everything (it overwrites `~/mednest-results/int8`; pass OUT=... to keep the current files).
