@@ -1601,3 +1601,8 @@ max_seq 3072):
   (json + samples), `gen.Intelligent-Internet-II-Medical-8B.t32.*`, `pmcppl.Intelligent-Internet-II-Medical-8B.json`, `pmcppl.hipster.Qwen-Qwen3-1.7B.json`
   -> DAS-6 `/var/scratch/skalra/flexslm/results` (= `~/FlexSLM/results`). Streamed via the laptop (login nodes; small), no overwrite (`tar -k`, pre-check), SHA-256 of all 20 identical on both sides,
   then deleted on hipster: hipster `results/` is now empty. DAS-6 `results/` is the single place for all eval results.
+
+### 2026-11-25: int8 board run resumed
+- Jetson reachable at 10.113.206.56 (freshly rebooted, 15 W, idle; old 192.168.0.101 entry times out). `controller/int8_test.py` on the board = repo version (checked).
+- New `controller/run_int8_resume.sh` runs only the 7 cases that did not run on 11-23: int8 nested / pair / pairn / both, then nested / pair / both + GPU load. tmux `int8r`, out `~/mednest-results/int8_resume` (first run's files in `~/mednest-results/int8` untouched).
+  Started 16:45 board time. First case (int8 nested 1.7B, five widths) built: 2.04 GB allocated, 2.43 GB with KV + graphs of all five widths, 2.7 GB available after prepare (bf16 nested: 4.0 GB / 0.67 GB).
