@@ -1597,3 +1597,7 @@ max_seq 3072):
   per-file sizes compared, then `.complete` on DAS-6 and ONLY THEN `rm -rf` of the hipster copy; refuses to overwrite an existing DAS-6 export. Smoke **402275** (300 kB dummy `hf_export/_movetest_20261125`)
   -> real move **402276** (afterok): no_order / single / indep_l0 / indep_l1, 2.34 GB each. Both pending (capacity busy). Ids in `~/FlexSLM-medbench/queue_2026-11-25.hipster.ids`,
   logs `~/FlexSLM-medbench/jobs/flexslm_to_das6-<id>.out`. After it: remove the dummy `_movetest_20261125` on DAS-6; the eval results stay in hipster home (`~/FlexSLM-medbench/results`).
+- **15:50 hipster eval results MOVED to DAS-6 (user).** All 20 files of `~/FlexSLM-medbench/results` (none were on DAS-6; 17 MB): gen.* of no_order L0-2, single L0-2, indep_l0, indep_l1
+  (json + samples), `gen.Intelligent-Internet-II-Medical-8B.t32.*`, `pmcppl.Intelligent-Internet-II-Medical-8B.json`, `pmcppl.hipster.Qwen-Qwen3-1.7B.json`
+  -> DAS-6 `/var/scratch/skalra/flexslm/results` (= `~/FlexSLM/results`). Streamed via the laptop (login nodes; small), no overwrite (`tar -k`, pre-check), SHA-256 of all 20 identical on both sides,
+  then deleted on hipster: hipster `results/` is now empty. DAS-6 `results/` is the single place for all eval results.
