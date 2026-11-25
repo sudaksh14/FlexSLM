@@ -1573,3 +1573,27 @@ max_seq 3072):
 - **Expectation, not measured:** by these sizes the int8 pair (1.72B + 596M) would allocate about 2.8 GB of weights + ~0.6 GB KV/graphs, next to ~5.4 GB available at process start, so it should fit; nested int8 1.7B about the same as 1.72B alone (+ CUDA graphs of the extra widths). Memory would then stop separating nested from the pair.
 - **Cluster:** int8 1.72B 39.3 vs bf16 39.0 (p = 0.52). int8 evals 28505-28511 and the no_kd chain still pending: DAS-6 nodes drained by root for a software update since 16:27 (node201 back to idle at 16:42, 205 draining under 28495, the rest drained). Resume: nothing to resubmit unless cancelled.
 - To resume later: copy nothing; on the board `cd ~/FlexSLM && bash controller/run_int8.sh` reruns everything (it overwrites `~/mednest-results/int8`; pass OUT=... to keep the current files).
+
+### 2026-11-25: all 11-23 jobs finished (DAS-6 + hipster); A2 ablations, independent controls and int8 analysed
+- **Queues empty on both clusters, nothing failed** (DAS-6 maintenance did not cancel anything; node204 still drain*). Nothing submitted, cancelled or deleted this session.
+  Per-question files copied to the laptop scratchpad only; analysis = per-set tables, pooled exact McNemar, macro difference with a set-stratified paired bootstrap (2,000).
+- **Macro avg / w/o MedCalc, all 12,797 q, 0 unboxed everywhere.** A2 (method) 188M 20.8/21.4, 364M 22.7/22.4, 596M 30.5/31.0; conventional 596M 23.1/22.9.
+  no_order (398299-303, hipster) 20.1/20.9, 22.2/22.5, 30.7/31.2. single (398304-308) 20.2/21.7, 20.9/21.4, 27.5/28.7. no_kd (28498-502) 20.0/21.1, 20.8/20.8, 25.7/25.8.
+  indep (398311 / 398314 / 28497) L0 20.7/21.5, L1 22.1/21.9, L2 31.1/31.6. int8 A2 20.5/21.0, 22.7/22.5, 30.5/31.0.
+  int8 1.7B (28504-508) vs bf16: 0.50B 19.9 vs 20.0, 0.75B 21.6 vs 21.5, 1.05B 24.4 vs 24.5, 1.33B 30.7 vs 30.7, 1.72B 39.3 vs 39.0.
+- **Differences to A2 at the same width (macro, 95% CI; pooled McNemar p):** full width (596M): no_order +0.2 [-0.6, +1.0] p=0.38; single -2.9 [-3.9, -1.9] p=6e-11; no_kd -4.7 [-5.9, -3.6] p=1e-32;
+  indep_l2 +0.6 [-0.2, +1.4] p=0.41; int8 +0.1 [-0.3, +0.5] (92% identical answers). 364M: single -1.8 [-2.7, -0.8], no_kd -1.9 [-2.9, -0.9], no_order -0.6 n.s., indep -0.6 n.s., int8 0.0.
+  188M: all within [-1.7, +0.6], nothing resolvable by macro CI. vs conventional: A2 596M +7.4 [6.1, 8.7], indep_l2 +8.0 [6.6, 9.3], no_kd +2.7 [1.4, 4.0] (p=2e-14). int8 1.7B: every width within ±0.3, all p > 0.5, 87-96% identical.
+- **Reading.** (1) Nesting costs nothing at the full width (indep_l2 = A2, n.s.) and the smaller widths match their independently trained slices: one model serves three widths for the cost of one.
+  (2) The +7.4 over conventional FT comes mostly from KD (no_kd -4.7); nested training without KD still adds +2.7 over conventional, which the old Stage-1 recipe did NOT show (22.6 vs 23.1, p=0.34). Configs differ only in
+  training all three widths (Taylor start is function-preserving at full width), so in this recipe nesting acts like a regulariser that KD makes redundant (indep_l2 + KD = A2). Single-run, one seed: report it, don't build on it.
+  (3) Importance ordering has no measurable effect in A2 (no_order = A2 at every width). (4) All widths every step beats one random width per step (-2.9 / -1.8), but single used about half the training time
+  (1 h 05 vs 2 h 19 on hipster): not compute-matched. (5) int8 weight-only costs no accuracy at any width of either backbone (only memory was measured on the board; speed/energy not).
+  (6) Caveat for every 188M/364M contrast: w/o MedCalc they all sit at 20.8-22.5, i.e. at the letter-prior floor (22.4); their differences are mostly MedCalc and say little.
+- Hipster: eval results are safe in ~/FlexSLM-medbench/results (home), but the no_order / single / indep_l0 / indep_l1 exports are only on /scratch (`hf_export` -> /scratch/skalra/flexslm/hf_export, wiped every few weeks);
+  user to decide whether they are needed again (e.g. for board runs) before scratch is wiped. Nothing deleted. Paper not edited (TODO at the end: ablation table, independent rows, int8 row).
+- **15:37 hipster -> DAS-6: the four A2-ablation exports are being MOVED to DAS-6 (user: "instead can we move these exports to das-6").** Home-copy job 402267 cancelled before it started.
+  New `scripts/hipster/move_exports_das6.sbatch` (capacity, 2 CPUs): per export tar stream to DAS-6 `/var/scratch/skalra/flexslm/hf_export/<same name>` (via `<name>.partial`), SHA-256 of the stream on both ends +
+  per-file sizes compared, then `.complete` on DAS-6 and ONLY THEN `rm -rf` of the hipster copy; refuses to overwrite an existing DAS-6 export. Smoke **402275** (300 kB dummy `hf_export/_movetest_20261125`)
+  -> real move **402276** (afterok): no_order / single / indep_l0 / indep_l1, 2.34 GB each. Both pending (capacity busy). Ids in `~/FlexSLM-medbench/queue_2026-11-25.hipster.ids`,
+  logs `~/FlexSLM-medbench/jobs/flexslm_to_das6-<id>.out`. After it: remove the dummy `_movetest_20261125` on DAS-6; the eval results stay in hipster home (`~/FlexSLM-medbench/results`).
