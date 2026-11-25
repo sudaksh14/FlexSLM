@@ -1638,3 +1638,8 @@ max_seq 3072):
 - **int8 + co-residency** paragraph in Sect. 5.4: bf16 pair does not fit reliably (OOM on longest prompts / swapping under load), speed unchanged when co-resident; int8 accuracy within +-0.3 at all widths (188M -0.3, p 0.04); int8 memory nested 1.7B 2.43 GB, pair 3.43 GB (1.9 GB to spare), 1.72B + nested 0.6B 3.46 GB; no int8 kernel, so no int8 speed/energy. "Both nested models" int8 case and the +load int8 cases were still running on the board (tmux int8r) and are NOT in the paper.
 - **Two-model simulation** paragraph in Sect. 5.5 (numbers from `controller/two_model.py`, approximate 1.7B profile, co-residency assumed and flagged): pair vs nested 1.7B +4.8 / +3.3 at 2.8 / 3.2 J, level at 3.6-4.4 J; adding the narrow 0.6B widths +2.5 at 3.2 J, only option below 2.4 J, misses 4.9% vs 10.9% at -1.0 acc.
 - Limitations: int8 speed/energy and the two-model comparison (simulation) named as open.
+
+### 2026-11-25 17:32: int8 resume, status (still running, tmux `int8r`)
+- Done, all fit, no swapping: nested 1.7B (2.43 GB with KV+graphs; 2.3 GB available at end), pair (3.43 GB; 1.9 GB), pairn = 1.72B + nested 0.6B (3.46 GB; 1.5 GB available, peak used 6.1 GB). All generations OK incl. 2,009-token prompts.
+- Running: `both` (nested 1.7B five widths + nested 0.6B three widths): built and prepared at 3.53 GB allocated, 96 of 128 generations done without error so far. Not started: nested / pair / both + GPU load.
+- The slow on-the-fly int8 layer (3.5-9x bf16 per matrix) makes each case take 5-25 min; remaining run ~1 h. Copies in `jetson_logs_mednest/mednest-results/int8_resume/`.
