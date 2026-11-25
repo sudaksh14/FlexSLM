@@ -1606,3 +1606,10 @@ max_seq 3072):
 - Jetson reachable at 10.113.206.56 (freshly rebooted, 15 W, idle; old 192.168.0.101 entry times out). `controller/int8_test.py` on the board = repo version (checked).
 - New `controller/run_int8_resume.sh` runs only the 7 cases that did not run on 11-23: int8 nested / pair / pairn / both, then nested / pair / both + GPU load. tmux `int8r`, out `~/mednest-results/int8_resume` (first run's files in `~/mednest-results/int8` untouched).
   Started 16:45 board time. First case (int8 nested 1.7B, five widths) built: 2.04 GB allocated, 2.43 GB with KV + graphs of all five widths, 2.7 GB available after prepare (bf16 nested: 4.0 GB / 0.67 GB).
+
+### 2026-11-25 17:07: int8 resume, first results (2 of 7 cases done; run still going in tmux `int8r`)
+- Copied to `jetson_logs_mednest/mednest-results/int8_resume/`. One process per case, 4 ordinary + 4 longest prompts (2,009 tokens), lean decoder, no swapping in either.
+- **int8 nested 1.7B, five widths (0.50-1.72B):** 2.04 GB allocated after build, 2.43 GB with KV + CUDA graphs of all five widths; at the end 2.3 GB available, peak used 5.3 GB. All 80 generations OK.
+- **int8 pair (1.72B + 596M):** 2.80 GB after build, 3.43 GB with both models' decoders; at the end 1.9 GB available, peak used 5.8 GB. All 32 generations OK, including the long prompts.
+- **Reading:** at int8 the pair FITS with margin (1.9 GB vs 2.3 GB for nested 1.7B). The bf16 memory argument for nesting (pair fails / swaps) does not carry over to int8; nested still uses 1.0 GB less than the pair and switches widths for free, but both fit.
+- Still running / queued: int8 pairn (1.72B + nested 0.6B), both (nested 1.7B + nested 0.6B), and nested / pair / both + GPU load. Accuracy: int8 1.72B = bf16 (39.3 vs 39.0, p 0.52); 28505-28511 still pending on DAS-6 (nodes drained for maintenance on 11-23, not checked today).
