@@ -1648,3 +1648,8 @@ max_seq 3072):
 - `both` (nested 1.7B five widths + nested 0.6B three widths, int8): FITS, all 128 generations OK; 3.53 GB allocated with KV+graphs, 0.92 GB available at the end, peak used 6.7 GB, 37 pages swapped out (~0.15 MB, negligible).
   So at int8 every combination fits: nested 1.7B 2.43 GB (2.3 GB left), pair 3.43 GB (1.9), 1.72B + nested 0.6B 3.46 GB (1.5), both nested 3.53 GB (0.9). In bf16 only single models / nested 1.7B fit (pair, pairn, both failed).
 - Running: nested + GPU load (load started with 2.1 GB available, 10 of 80 generations so far). Then pair + load, both + load. Paper (Sect. 5.4) already states the first three int8 fits; `both` int8 fitting could be added.
+
+### 2026-11-25 17:45: int8 board run cancelled by the user (will resume later); paper sentence added
+- tmux `int8r` killed during "nested + GPU load" (10 of 80 generations, no result line; load process gone too). Board idle, no tmux session. Not run: nested / pair / both + GPU load.
+  To resume: copy nothing; on the board edit `controller/run_int8_resume.sh` to keep only the three load cases (or run them by hand) with OUT=~/mednest-results/int8_load so the finished files stay.
+- Paper Sect. 5.4: one sentence added: both nested models together (eight widths) fit in int8 (3.53 GB, 0.9 GB to spare). PDF rebuilt (19 pages, no errors).
