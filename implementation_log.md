@@ -1620,4 +1620,12 @@ max_seq 3072):
   0.6B: 596M 30.5 vs 30.5 (p 0.79) | 364M 22.8 vs 22.7 (p 0.52) | 188M 20.5 vs 20.8 (p 0.041; w/o Calc 21.0 vs 21.4). Identical answers 86-96%.
 - **Reading:** int8 costs no accuracy at any width except a 0.3-point loss at 188M (borderline, p 0.04; that width is near the guess rate anyway). Shared int8 weights keep the nested property.
   With the board result (int8 pair fits with 1.9 GB free), an int8 deployment can hold two separate full-width models; the paper's memory argument for nesting must be stated for bf16 only.
-- Also landed on DAS-6 (not yet analysed): Stage-2-only ablation evals no_kd, no_order, single, indep_l0, indep_l1 (see results/ for which levels).
+- (Correction: the A2 ablations and independent controls were already analysed by the parallel session, entry "2026-11-25: all 11-23 jobs finished" above.)
+
+### 2026-11-25: paper red cells filled (user: "finalise the missing red results")
+- Source: the parallel session's analysis (log entry "2026-11-25: all 11-23 jobs finished"), per-set numbers recomputed from the DAS-6 samples files (same values). Backup `paper/main_backup_2026-11-25.tex`; PDF rebuilt (18 pages, no errors), draft PDF refreshed.
+- Table main: new row Independent (596M) 39.5/40.7/47.1/28.0/30.9/20.3/11.0 = 31.1 (now bold where best; MedNest 596M keeps bold only on HeadQA), Independent 364M 22.1, 188M 20.7; caption defines Independent.
+- Accuracy text: independent narrow models no better (p 0.63; nested 364M ahead p 0.03, pooled); full width alone + KD 31.1 = MedNest 30.5 (p 0.41): nesting costs nothing at full width, the gain over conventional FT is mostly distillation.
+- Table ablation: no KD 20.0/20.8/25.7 (p<1e-4), no ordering 20.1/22.2/30.7 (0.38), single width per step 20.2/20.9/27.5 (<1e-4, about half the training time), independent 20.7/22.1/31.1 (0.41); three new text paragraphs (distillation, all widths per step, ordering).
+- Jetson table: Separate 188M / 364M accuracy = independent models 20.7 / 22.1.
+- No 	bd left. Remaining blue TODOs: gap search before submission, Fig. 1. Not added (user to decide): int8 results (accuracy = bf16 at every width; int8 pair fits on the board), two-model simulation, 18 pages vs 12-page limit.
