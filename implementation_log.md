@@ -1643,3 +1643,8 @@ max_seq 3072):
 - Done, all fit, no swapping: nested 1.7B (2.43 GB with KV+graphs; 2.3 GB available at end), pair (3.43 GB; 1.9 GB), pairn = 1.72B + nested 0.6B (3.46 GB; 1.5 GB available, peak used 6.1 GB). All generations OK incl. 2,009-token prompts.
 - Running: `both` (nested 1.7B five widths + nested 0.6B three widths): built and prepared at 3.53 GB allocated, 96 of 128 generations done without error so far. Not started: nested / pair / both + GPU load.
 - The slow on-the-fly int8 layer (3.5-9x bf16 per matrix) makes each case take 5-25 min; remaining run ~1 h. Copies in `jetson_logs_mednest/mednest-results/int8_resume/`.
+
+### 2026-11-25 17:38: int8 resume, all four no-load cases done (load cases running, tmux `int8r`)
+- `both` (nested 1.7B five widths + nested 0.6B three widths, int8): FITS, all 128 generations OK; 3.53 GB allocated with KV+graphs, 0.92 GB available at the end, peak used 6.7 GB, 37 pages swapped out (~0.15 MB, negligible).
+  So at int8 every combination fits: nested 1.7B 2.43 GB (2.3 GB left), pair 3.43 GB (1.9), 1.72B + nested 0.6B 3.46 GB (1.5), both nested 3.53 GB (0.9). In bf16 only single models / nested 1.7B fit (pair, pairn, both failed).
+- Running: nested + GPU load (load started with 2.1 GB available, 10 of 80 generations so far). Then pair + load, both + load. Paper (Sect. 5.4) already states the first three int8 fits; `both` int8 fitting could be added.
