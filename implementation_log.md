@@ -1613,3 +1613,11 @@ max_seq 3072):
 - **int8 pair (1.72B + 596M):** 2.80 GB after build, 3.43 GB with both models' decoders; at the end 1.9 GB available, peak used 5.8 GB. All 32 generations OK, including the long prompts.
 - **Reading:** at int8 the pair FITS with margin (1.9 GB vs 2.3 GB for nested 1.7B). The bf16 memory argument for nesting (pair fails / swaps) does not carry over to int8; nested still uses 1.0 GB less than the pair and switches widths for free, but both fit.
 - Still running / queued: int8 pairn (1.72B + nested 0.6B), both (nested 1.7B + nested 0.6B), and nested / pair / both + GPU load. Accuracy: int8 1.72B = bf16 (39.3 vs 39.0, p 0.52); 28505-28511 still pending on DAS-6 (nodes drained for maintenance on 11-23, not checked today).
+
+### 2026-11-25 17:10: int8 accuracy, all widths (DAS-6 28504-28511 complete, no errors; queue empty, nodes back except node204)
+- Weight-only int8 (shared row scales, narrower widths = slices of the full model's int8 weights) vs bf16, macro avg, McNemar over 12,797 q:
+  1.7B: 1.72B 39.3 vs 39.0 (p 0.52) | 1.33B 30.7 vs 30.8 (p 0.88) | 1.05B 24.4 vs 24.5 (p 0.51) | 0.75B 21.6 vs 21.5 (p 0.82) | 0.50B 19.9 vs 20.0 (p 0.73).
+  0.6B: 596M 30.5 vs 30.5 (p 0.79) | 364M 22.8 vs 22.7 (p 0.52) | 188M 20.5 vs 20.8 (p 0.041; w/o Calc 21.0 vs 21.4). Identical answers 86-96%.
+- **Reading:** int8 costs no accuracy at any width except a 0.3-point loss at 188M (borderline, p 0.04; that width is near the guess rate anyway). Shared int8 weights keep the nested property.
+  With the board result (int8 pair fits with 1.9 GB free), an int8 deployment can hold two separate full-width models; the paper's memory argument for nesting must be stated for bf16 only.
+- Also landed on DAS-6 (not yet analysed): Stage-2-only ablation evals no_kd, no_order, single, indep_l0, indep_l1 (see results/ for which levels).
