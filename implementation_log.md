@@ -1653,3 +1653,73 @@ max_seq 3072):
 - tmux `int8r` killed during "nested + GPU load" (10 of 80 generations, no result line; load process gone too). Board idle, no tmux session. Not run: nested / pair / both + GPU load.
   To resume: copy nothing; on the board edit `controller/run_int8_resume.sh` to keep only the three load cases (or run them by hand) with OUT=~/mednest-results/int8_load so the finished files stay.
 - Paper Sect. 5.4: one sentence added: both nested models together (eight widths) fit in int8 (3.53 GB, 0.9 GB to spare). PDF rebuilt (19 pages, no errors).
+
+### 2026-11-27: paper revised after the author's review v1 (`paper/reviews/MedNest_IEA-AIE2027_review_v1.pdf`, 123 annotations)
+- Backups `paper/main_backup_2026-11-27.tex`, `references_backup_2026-11-27.bib`. PDF rebuilt (no errors / undefined refs; two 4-6 pt overfull lines), `MedNest_IEA-AIE2027_draft.pdf` refreshed. **Still 19 pages** (text ends p. 16, 48 refs on pp. 16-19) vs. the 12-page limit incl. refs.
+- **New figures:** Fig. 1 = TikZ pipeline in `paper/fig_pipeline.tex` (generic n widths: ordering -> nested FT + KD -> one checkpoint; controller loop -> slice view -> answer -> feedback). Fig. 2 = accuracy vs params (log x) for both nested models + independent / MatFormer-style / conventional / Apollo (like Fig. 1 of the 11-17 draft). Fig. 3 = Jetson two-panel ms/token and J/answer vs params (0.6B and 1.7B, nine widths each, + same-shape dense), **medians** from `jetson_logs_mednest/mednest-results/shape_only_{full,1p7b}/widths_15W*.jsonl` (1.7B full width 77.0 ms / 22.0 J; the old text quoted 1.7B means 32.8/53.3/78.9).
+- **New tables:** width-selection strategies (Considers / Chooses / real-life situation); switching time + memory (MedNest vs separate models).
+- **Method:** generic n widths, slicing equations (sliced RMSNorm, attention with GQA map g(j), SwiGLU FFN, param count P_l, run-time views); alpha/tau explained; controller rewritten (why, profile terms a,b,c,p,n_a, rho EMA, virtual queue Q, V); task-aware variant dropped from the method; model dims / schedule moved to a new "Training details" paragraph (AdamW, lr 5e-5, wd 0, 1% warm-up + cosine, eff. batch 32 x 3,072, 1 epoch, no clipping, seed 0; conventional FT = same, full width only, CE on answers, no KD).
+- **Removed per review:** untrained rows (Tables 1, 2, Jetson) except the FaithMed reasoning-mode reproduction (kept, trimmed: 1.7B at 1,024/2,048/4,096 + 0.6B at 4,096; the review asks to keep it concise and explain Avg); naive-nested 1.7B rows; Apollo2 models; GRPO row; McNemar everywhere except the ablation table (explained there); MedCalc "advantage" sentences; gradient-clipping / lessons section; GQA-divisor paragraph; progressive-teacher sentence; independent row of the ablation table. **Controller results section 5.5 and its table are inside `\iffalse` (review: "remove for now, add later if space permits").** Abstract/contributions no longer quote controller numbers.
+- **1.7B ablations added** to the ablation table from the intern's report (her eval, footnoted): MedNest 19.8/23.1/39.3, without ordering + head pairing 18.8/16.7/40.0 (n.s.), + attention-head ordering 20.2/23.1/39.1 (p 0.04). **Not available for 1.7B: no-KD and one-width-per-step ablations (would need new runs; not submitted, user to decide).**
+- int8 is now its own subsection (compatibility with quantisation; bf16 nested 1.7B 4.0 GB / 0.67 GB free vs int8 2.43 GB / 2.3 GB free; int8 pair fits but gives two operating points). No TensorRT runs added (review said "if necessary").
+- 16 new verified bib entries (subagent web check): basit2024medaide, kallakuri2025saliency, nissen2025medicineedge, wu2025chartsumm, kang2026pocketrag, elmir2024tinyllavamed, laskaridis2024melt, xiao2024pockets, subedi2021multitenancy, yi2023coldinference, fu2024serverlessllm, ainslie2023gqa, paszke2019pytorch, nvidia2024tensorrt, gerganov2023llamacpp, dettmers2022llmint8. Several are arXiv-only (medaide, nissen, xiao, kang, elmir). LLM.int8 is mixed-precision, cited only as "standard int8 quantisation".
+- Unclear review note: a free-text box "we" on review p. 11 pointing at the running head; not acted on.
+
+### 2026-11-27: 1.7B no-KD and single-width ablations submitted on DAS-6 (user: "run the 1.7B no-KD and single-width ablations on DAS-6")
+- **Baseline = intern's run 4** (`sft.medmix_qwen3_1p7b_10L_kv_teacher`: 10 levels, kv_group, reordered hidden+MLP warm start, SHARD sampling
+  min+max+1 random middle, KD 0.5/T2 from her fine-tuned 1.7B teacher; Snellius 4 x H100, 1,044 steps, 50 min, peak 52.5 GB/GPU at 8 seq).
+  Ablations run in HER code so only one thing changes: clone `/var/scratch/skalra/flexslm_student/code`, new branch **mednest-ablations-das6**
+  (e60526b + 3e07cdb), on top of 1e5fdfa:
+  * `sft.medmix_qwen3_1p7b_10L_kv_nokd`: kd_lambda 0 (CE on answers; teacher not loaded).
+  * `sft.medmix_qwen3_1p7b_10L_kv_teacher_single`: `level_sampling="single"`, one uniformly random level per step, seeded by the step
+    (same level on both ranks). Not compute-matched to run 4 (1 level/step vs 3), like the 0.6B `single` ablation.
+  * DAS-6 adaptations (both): 2 x A40, batch_size 16/GPU (effective 32 as run 4) in **micro-batches of 2 with gradient accumulation**
+    (losses normalised by whole-batch token counts -> same update; new CPU test `test/test_sft_microbatch.py`: losses + all grads equal for
+    micro 1/2/4 with and without KD, single sampling deterministic per step; job 28564 PASSED). Teacher path = our HF export of her teacher
+    `/var/scratch/skalra/flexslm/hf_export/old_teacher_1p7b/level2` (her hf_export copy has no weights). No W&B (her account): wandb_project_name
+    None + WANDB_MODE=disabled. `from_pretrained(dtype=)` -> `torch_dtype=` in reorder_qwen3.py and training.py (our env: transformers 4.51.1;
+    first reorder 28565 failed on it, first chain 28565-28577 cancelled).
+  * Warm start rebuilt with her `reorder_qwen3.py --force` (her DAS-6 copy had config + tokenizer only); the job checks her log line
+    "212 were already among the first 640" before anything trains.
+- **New scripts:** `scripts/das6/student_pytest.sbatch`, `student_reorder.sbatch`, `student_train.sbatch` (node205, HOME=$SH/home so models land in
+  `$SH/home/FlexSLM/saved_models` for `export_student.sbatch`; smoke mode `STUDENT_SMOKE_STEPS` = longest examples first, throw-away HOME).
+- **Chain (ids also in DAS-6 `~/FlexSLM/jobs/queue_2026-11-27.ids`):** reorder **28578** (node205) -> smokes 28579 (nokd) / 28580 (single), 12 steps each ->
+  train **28581** (nokd) / **28582** (single), node205, --time 36 h each (estimate ~10 h each, run one after the other) -> export 28583 / 28584 (fatq) ->
+  evals (32 tokens, OUR eval_gen) L0/L5/L9: 28585 28587 28589 (nokd), 28586 28588 28590 (single).
+  Results: DAS-6 `~/FlexSLM/results/gen.hf_export-student__<config>-level{0,5,9}.t32.json`.
+- To compare: run 4 in OUR evaluation L0/L5/L9 = 19.4 / 23.3 / 39.0 (Table qwen17). The paper's 1.7B ablation block currently uses the intern's
+  evaluation (19.8/23.1/39.3); when the new rows arrive, switch that block to our evaluation for all rows that we evaluated ourselves.
+- 17:57: reorder 28578 output matches her run-4 warm start (reordered untrained losses per level identical to her log to 3 decimals, except
+  level 0 12.784 vs 12.771; full model unchanged, same top token 100%). Her script no longer prints the "212 ... first 640" line the job checks,
+  so 28578 will exit 3; smokes 28579/28580 switched to `afterany:28578` (weights were already saved). Script check now uses the loss table.
+
+### 2026-11-28: DAS-6 chain fixes; paper revised after review v2
+- **DAS-6:** first smokes 28579/28580 failed: her code passes `weights_only=` to `Trainer.fit` / `load_from_checkpoint` (Lightning >= 2.6); ours is
+  2.5.3 (loads with weights_only=False by default) -> removed the kwarg (her branch, commit 0a15c88). Chain resubmitted: smokes **28591** (nokd) /
+  **28592** (single, afterany 28591) -> train **28593** / **28594** -> export 28595 / 28596 -> evals 28597-28602 (L0/L5/L9). Smoke 28591: 12 longest
+  steps OK, peak 39.3 GB/GPU (micro-batch 2), ~34 s per longest step -> full runs expected ~1-3 h each, not 10 h.
+- **Paper (review v2, 45 notes; backups main_backup_2026-11-28.tex, references_backup_2026-11-28.bib, fig_pipeline_backup_2026-11-28.tex):** 16 pages
+  (text ends p. 14), 39 refs. Removed: controller section (3.4) + strategy table, int8 section, FaithMed table (now text), McNemar paragraph and
+  p column, LLaMaFlex/Matryoshka-suites/Gemma sentences, jeong citation, xiao/elmir/sreenivas cites. Added: fig_block.tex (nested transformer
+  block), configuration table, ordering figure (untrained loss per width, original vs ordered, both kv_group; intern reorder log 29106477 /
+  our 28578), merged accuracy table (0.6B + 1.7B + Apollo; narrower nested widths "--" train tokens), accuracy-vs-size figure moved to the
+  intro with Apollo cited and FaithMed-1.7B (reported 47.8, flagged not comparable), Jetson citation, abstract energy claims (narrowest width
+  2.5x less energy than full; direct answer 45x less than Qwen3-0.6B reasoning 456 J), 1.7B training time (run 4: 50 min on 4 x H100).
+  Fig. 1 pipeline part (b): controller replaced by "select width that fits the budget", feedback loop removed.
+- Ordering explanation rewritten: 7 of 9 narrow widths of unordered Qwen3-1.7B are above ln|V| = 11.93 before training, all below after
+  ordering; after FT ordering + pairing 16.7 -> 23.1 at 0.90B; on 0.6B no effect because the narrow widths are capacity-bound.
+- 1.7B ablation rows (no KD, one width/step) are \tbd until 28597-28602 finish. Recommended extra run (not submitted, user to decide):
+  1.7B with head pairing kept but WITHOUT ordering (her `_10L_kv_teacher` with warm start = original Qwen3-1.7B), to isolate ordering after FT.
+- **2026-11-28: no-ordering 1.7B run approved by the user.** New config in her code `sft.medmix_qwen3_1p7b_10L_kv_teacher_noorder` = run 4 without
+  warm_start (original Qwen/Qwen3-1.7B order), kv_group + KD + sandwich 3/step + micro-batch 2 as the other ablations. DAS-6 was unreachable
+  (ssh timeouts), so a laptop background job (scratchpad `student/submit_noorder.sh`) waits up to 3 h, uploads sft.py, commits on branch
+  mednest-ablations-das6, and submits smoke (12 longest steps; KD + 3 widths = heaviest memory case) -> train (node205) -> export -> evals L0/L5/L9.
+  Job ids appended to DAS-6 `~/FlexSLM/jobs/queue_2026-11-27.ids` (line "NOORDER"). Paper: add a row "without importance ordering" to the
+  1.7B block of Table ablation when it lands.
+- **2026-11-28, later: smoke results + resubmission 3.** nokd smoke 28591 PASSED (12 longest steps, 39.3 GB, model saved). single smoke 28592 OOM at
+  the first optimizer.step (AdamW multi-tensor temporaries; teacher +3.4 GB on top) -> trains 28593/28594 never ran. Fix (her branch, commit
+  bb33c82, whose message mentions only _noorder but also contains this): new context option `adam_foreach` (AdamW foreach=False, same update,
+  no parameter-sized temporaries); KD configs (_single, _noorder) use micro_batch_size 1 + adam_foreach False; _nokd unchanged (smoke passed).
+  The background submitter connected just before it was stopped and queued a duplicate noorder chain 28603-28608 -> cancelled.
+  **Live chain (RESUBMIT 3):** smoke_single **28609** -> smoke_noorder **28610** -> train nokd **28611**, single **28612**, noorder **28613** (node205,
+  one after another) -> exports 28614 / 28618 / 28622 -> evals L0/L5/L9: nokd 28615-28617, single 28619-28621, noorder 28623-28625.
